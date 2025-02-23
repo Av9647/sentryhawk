@@ -1,0 +1,58 @@
+
+
+.git
+.DS_Store
+*venv
+
+## airflow files
+airflow_settings.yaml
+__pycache__/
+astro
+airflow-webserver.pid
+webserver_config.py
+airflow.cfg
+airflow.db
+dbt_project/.env
+dbt_project/venv
+homework/dbt_project/.env
+homework/dbt_project/venv
+venv
+.vscode
+.idea/
+.vscode
+
+## dbt project files
+dbt_project/logs/
+dbt_project/.user.yml
+dbt_project/target/
+dbt_project/dbt_packages/
+dbt_project/*venv/
+dbt_project/dbt.env
+package-lock.yml
+dbt_project
+
+## project specific files
+include/test.txt
+
+#Environment variables
+.env
+
+#Old/archived files
+jobs/local/old_scripts
+jobs/batch/old_scripts
+jobs/local/test
+old_dags
+sql/iceberg/old_scripts
+
+#Unused DAG files
+dags/checks
+dags/community
+dags/dbt
+dags/pyspark
+
+#glue_job_runner - used for local testing
+#jobs/glue_job_runner.py
+jobs/glue_job_runner_2.py
+
+#Unfinished streaming work
+jobs/streaming
