@@ -211,6 +211,7 @@ def process_micro_batch(vendor, product):
     if cve_response:
         processed_records = process_cve_records_variot(cve_response)
         append_to_staging(processed_records, vendor, product)
+        print(processed_records)
     else:
         print(f"No CVE data for vendor: {vendor}, product: {product}")
 
