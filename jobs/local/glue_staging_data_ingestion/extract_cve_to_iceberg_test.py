@@ -23,11 +23,8 @@ job.init(args["JOB_NAME"], args)
 # Enable Iceberg Support in Spark
 spark = SparkSession.builder \
     .config("spark.sql.catalog.glue_catalog", "org.apache.iceberg.spark.SparkCatalog") \
-    .config("spark.sql.catalog.glue_catalog.type", "glue") \
+    .config("spark.sql.catalog.glue_catalog.type", "hive") \
     .config("spark.sql.catalog.glue_catalog.warehouse", STAGING_S3_BUCKET) \
-    .config("spark.sql.iceberg.handle-timestamp-without-timezone", "true") \
-    .config("hive.metastore.client.factory.class", "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory") \
-    .enableHiveSupport() \
     .getOrCreate()
 
 # Extract Latest File per Product (Avoid Duplicates)
@@ -54,14 +51,11 @@ print("Raw Data Schema:")
 df_raw.printSchema()
 
 # Fix: Double explode to handle nested array structure
-df = df_raw.withColumn("cve_pair", F.explode("cvelistv5"))  # First explode
-df = df.withColumn("cve_pair", F.explode("cve_pair"))  # Second explode
+df = df_raw.withColumn("cve_pair", F.explode("cvelistv5"))  # Explode json
 
 df.printSchema()  # Debugging: Print schema after transformation
 
-df_cleaned = df.select(
-    F.col("cve_pair").alias("cve_id")  # Extract CVE ID
-)
+df_cleaned = df.select(F.col("cve_pair")[0].alias("cve_id"))  # Extract CVE ID
 
 df_cleaned.show(truncate=False)  # Debugging: Print sample data
 
