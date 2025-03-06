@@ -1,4 +1,3 @@
-
 import sys
 import re
 from awsglue.transforms import *
@@ -9,7 +8,7 @@ from awsglue.job import Job
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.functions import col, expr, from_json, current_timestamp
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType
+from pyspark.sql.types import StructType, StructField, StringType, ArrayType, DoubleType, TimestampType
 
 # AWS S3 Paths
 RAW_S3_BUCKET = "s3://cve-api-raw-data/raw_data/"
@@ -29,6 +28,8 @@ spark = SparkSession.builder \
     .config("spark.sql.catalog.glue_catalog.warehouse", STAGING_S3_BUCKET) \
     .config("spark.sql.iceberg.handle-timestamp-without-timezone", "true") \
     .config("hive.metastore.client.factory.class", "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory") \
+    .config("spark.hadoop.fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
+    .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
     .enableHiveSupport() \
     .getOrCreate()
 
@@ -62,13 +63,13 @@ df_raw = spark.read.option("multiline", "true").json(latest_files_paths) \
 # -------------------------------
 # Step 3. Extract Vendor and Product from Filename
 # -------------------------------
-df_raw = df_raw.withColumn("file_name", F.regexp_extract("source_file", r"([^/]+)$", 1))
-df_raw = df_raw.withColumn("vendor", F.regexp_extract("file_name", r"^([a-zA-Z]+)_", 1)) \
-               .withColumn("product", F.regexp_extract("file_name", r"^[a-zA-Z]+_([a-zA-Z]+)_", 1))
+df_raw = df_raw.withColumn("vendor", F.regexp_extract("source_file", r"^([^_]+)_", 1)) \
+    .withColumn("product", F.regexp_extract("source_file", r"^[^_]+_([^_]+)_", 1))
 
 # -------------------------------
 # Step 4. Explode the JSON Array and Extract CVE Details
 # -------------------------------
+# Assuming the JSON structure is: {"cvelistv5": [ [cveId, details], ... ]}
 df_exploded = df_raw.select("vendor", "product", F.explode("cvelistv5").alias("cve_entry"))
 df_exploded = df_exploded.withColumn("cveId", col("cve_entry").getItem(0)) \
     .withColumn("details", col("cve_entry").getItem(1))
@@ -81,24 +82,22 @@ details_schema = StructType([
         StructField("datePublished", StringType(), True),
         StructField("dateUpdated", StringType(), True)
     ]), True),
-    StructField("containers", StructType([
-        StructField("cna", StructType([
-            StructField("metrics", StructType([
-                StructField("cvssV3_1", StructType([
-                    StructField("baseScore", DoubleType(), True),
-                    StructField("baseSeverity", StringType(), True)
-                ]), True),
-                StructField("cvssV3", StructType([
-                    StructField("baseScore", DoubleType(), True),
-                    StructField("baseSeverity", StringType(), True)
-                ]), True),
-                StructField("cvssV2", StructType([
-                    StructField("baseScore", DoubleType(), True),
-                    StructField("baseSeverity", StringType(), True)
-                ]), True)
+    StructField("metrics", ArrayType(
+        StructType([
+            StructField("cvssV3_1", StructType([
+                StructField("baseScore", DoubleType(), True),
+                StructField("baseSeverity", StringType(), True)
+            ]), True),
+            StructField("cvssV3", StructType([
+                StructField("baseScore", DoubleType(), True),
+                StructField("baseSeverity", StringType(), True)
+            ]), True),
+            StructField("cvssV2", StructType([
+                StructField("baseScore", DoubleType(), True),
+                StructField("baseSeverity", StringType(), True)
             ]), True)
-        ]), True)
-    ]), True)
+        ])
+    ), True)
 ])
 
 df_exploded = df_exploded.withColumn("details", from_json("details", details_schema))
@@ -106,13 +105,17 @@ df_exploded = df_exploded.withColumn("details", from_json("details", details_sch
 # -------------------------------
 # Step 6. Extract Nested Fields and Add Ingestion Timestamp
 # -------------------------------
-df_exploded = df_exploded.withColumn("datePublished", col("details.cveMetadata.datePublished")
-    ).withColumn("dateUpdated", col("details.cveMetadata.dateUpdated")
-    ).withColumn("baseScore",
-        F.expr("coalesce(details.containers.cna.metrics.cvssV3_1.baseScore, details.containers.cna.metrics.cvssV3.baseScore, details.containers.cna.metrics.cvssV2.baseScore)")
-    ).withColumn("baseSeverity",
-        F.expr("coalesce(details.containers.cna.metrics.cvssV3_1.baseSeverity, details.containers.cna.metrics.cvssV3.baseSeverity, details.containers.cna.metrics.cvssV2.baseSeverity)")
-    ).withColumn("ingestion_ts", current_timestamp())
+df_exploded = df_exploded.withColumn("datePublished", col("details.cveMetadata.datePublished")) \
+    .withColumn("dateUpdated", col("details.cveMetadata.dateUpdated"))
+
+df_exploded = df_exploded.withColumn("baseScore", 
+    expr("coalesce(details.metrics[0].cvssV3_1.baseScore, details.metrics[0].cvssV3.baseScore, details.metrics[0].cvssV2.baseScore)")
+)
+df_exploded = df_exploded.withColumn("baseSeverity", 
+    expr("coalesce(details.metrics[0].cvssV3_1.baseSeverity, details.metrics[0].cvssV3.baseSeverity, details.metrics[0].cvssV2.baseSeverity)")
+)
+# Add the ingestion timestamp for daily point reference.
+df_exploded = df_exploded.withColumn("ingestion_ts", current_timestamp())
 
 # -------------------------------
 # Step 7. Select Final Fields in the Desired Order
@@ -140,6 +143,7 @@ spark.sql("""
 # -------------------------------
 # Step 9. Append New Data into the Iceberg Table
 # -------------------------------
+# Optionally deduplicate to avoid duplicate records.
 df_append = final_df.dropDuplicates(["cveId", "datePublished"])
 df_append.write \
     .format("iceberg") \
