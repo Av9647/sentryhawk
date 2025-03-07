@@ -195,6 +195,8 @@ try:
             StructField("value", StringType(), True)
         ])), True),
         StructField("metrics", MapType(StringType(), ArrayType(StructType([
+            StructField("source", StringType(), True),
+            StructField("type", StringType(), True),
             StructField("cvssData", StructType([
                 StructField("version", StringType(), True),
                 StructField("vectorString", StringType(), True),
@@ -215,6 +217,7 @@ try:
         col("englishDescription.value").alias("Descriptions"),
         col("details.metrics").alias("cvssMetrics")
     )
+    
     fkie_df = fkie_df.withColumn("lastModified", F.to_timestamp("lastModified"))
     
     cvss_versions = [row["cvssVersion"] for row in fkie_df.select(explode(map_keys(col("cvssMetrics"))).alias("cvssVersion")).distinct().collect()]
@@ -227,6 +230,8 @@ try:
             ).select(
                 "cveId", "lastModified", "vulnStatus", "Descriptions",
                 struct(
+                    col("cvssEntry.source").alias("source"),
+                    col("cvssEntry.type").alias("type"),
                     col("cvssEntry.cvssData.version").alias("version"),
                     col("cvssEntry.cvssData.vectorString").alias("vectorString"),
                     col("cvssEntry.cvssData.baseScore").alias("baseScore"),
@@ -293,6 +298,8 @@ try:
             vulnStatus string,
             Descriptions string,
             cvssData ARRAY<STRUCT<
+                source string,
+                type string,
                 version string,
                 vectorString string,
                 baseScore double,

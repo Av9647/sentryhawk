@@ -21,9 +21,9 @@ filename_pattern = r"([a-zA-Z0-9]+)_([a-zA-Z0-9]+)_([0-9-]+)_([0-9-]+)\.json"
 match = re.search(filename_pattern, os.path.basename(file_path))
 if match:
     vendor, product, date_part, time_part = match.groups()
-    ingestion_ts = f"{date_part} {time_part.replace('-', ':')}"
+    ingestion_timestamp = f"{date_part} {time_part.replace('-', ':')}"
 else:
-    vendor, product, ingestion_ts = "unknown", "unknown", "unknown"
+    vendor, product, ingestion_timestamp = "unknown", "unknown", "unknown"
 
 # Read JSON file
 df = spark.read.json(file_path)
@@ -65,11 +65,9 @@ fkie_schema = StructType([
     StructField("id", StringType(), True),
     StructField("lastModified", StringType(), True),
     StructField("vulnStatus", StringType(), True),
-    StructField("descriptions", ArrayType(StructType([
-        StructField("lang", StringType(), True),
-        StructField("value", StringType(), True)
-    ])), True),
     StructField("metrics", MapType(StringType(), ArrayType(StructType([
+        StructField("source", StringType(), True),
+        StructField("type", StringType(), True),
         StructField("cvssData", StructType([
             StructField("version", StringType(), True),
             StructField("vectorString", StringType(), True),
@@ -77,7 +75,11 @@ fkie_schema = StructType([
         ]), True),
         StructField("exploitabilityScore", DoubleType(), True),
         StructField("impactScore", DoubleType(), True)
-    ])), True))
+    ])), True)),
+    StructField("descriptions", ArrayType(StructType([
+        StructField("lang", StringType(), True),
+        StructField("value", StringType(), True)
+    ])), True)
 ])
 
 fkie_df = fkie_df.withColumn("details", from_json(col("details_str"), fkie_schema))
@@ -88,8 +90,8 @@ fkie_df = fkie_df.withColumn(
     col("details.id").alias("cveId"),
     col("details.lastModified").alias("lastModified"),
     col("details.vulnStatus").alias("vulnStatus"),
-    col("englishDescription.value").alias("Descriptions"),
-    col("details.metrics").alias("cvssMetrics")
+    col("details.metrics").alias("cvssMetrics"),
+    col("englishDescription.value").alias("Descriptions")
 )
 
 # Extract CVSS versions dynamically
@@ -99,17 +101,19 @@ cvss_dfs = []
 for version in cvss_versions:
     cvss_dfs.append(
         fkie_df.select(
-            "cveId", "lastModified", "vulnStatus", "Descriptions",
-            explode(col(f"cvssMetrics.{version}")).alias("cvssEntry")
+            "cveId", "lastModified", "vulnStatus",
+            explode(col(f"cvssMetrics.{version}")).alias("cvssEntry"), "Descriptions"
         ).select(
-            "cveId", "lastModified", "vulnStatus", "Descriptions",
+            "cveId", "lastModified", "vulnStatus",
             struct(
+                col("cvssEntry.source"),
+                col("cvssEntry.type"),
                 col("cvssEntry.cvssData.version"),
                 col("cvssEntry.cvssData.vectorString"),
                 col("cvssEntry.cvssData.baseScore"),
                 col("cvssEntry.exploitabilityScore"),
                 col("cvssEntry.impactScore")
-            ).alias("cvssData")
+            ).alias("cvssData"), "Descriptions"
         )
     )
 
@@ -137,11 +141,13 @@ print("Null cveId values in df_cvss_combined:", df_cvss_combined.filter(col("cve
 # Merge DataFrames
 final_df = cvelistv5_df.join(df_cvss_combined, "cveId", "outer").withColumn("vendor", lit(vendor))\
     .withColumn("product", lit(product))\
-    .withColumn("ingestion_ts", lit(ingestion_ts))
+    .withColumn("ingestion_timestamp", lit(ingestion_timestamp))
 
 # Reorder Columns
-final_columns = ["vendor", "product", "ingestion_ts"] + [col for col in final_df.columns if col not in ["vendor", "product", "ingestion_ts"]]
+final_columns = ["vendor", "product", "ingestion_timestamp"] + [col for col in final_df.columns if col not in ["vendor", "product", "ingestion_timestamp"]]
 final_df = final_df.select(*final_columns)
 
 # Show result
-final_df.show(100, truncate=False)
+# final_df.show(100, truncate=False)
+filtered_value = final_df.filter(final_df["cveId"] == "CVE-2020-1483")#.select("cvssData")
+filtered_value.show(truncate=False)
