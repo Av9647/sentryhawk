@@ -141,9 +141,10 @@ try:
     df_raw = df_raw.withColumn("ingestionTimestamp", 
                                F.to_timestamp(F.regexp_replace("ingestionTimestamp_str", "_", " "), "yyyy-MM-dd HH-mm-ss")
                               ).drop("ingestionTimestamp_str")
+    
     # Create partition column from ingestionTimestamp
-    df_raw = df_raw.withColumn("ingestion_date", F.to_date("ingestionTimestamp"))
-    add_log("Extracted metadata (vendor, product, ingestionTimestamp, ingestion_date) from file names.")
+    df_raw = df_raw.withColumn("ingestionDate", F.to_date("ingestionTimestamp"))
+    add_log("Extracted metadata (vendor, product, ingestionTimestamp, ingestionDate) from file names.")
 except Exception as e:
     add_log(f"Error extracting metadata: {str(e)}")
     raise
@@ -268,11 +269,18 @@ try:
         .withColumn("vendor", lit(df_raw.select("vendor").first()[0])) \
         .withColumn("product", lit(df_raw.select("product").first()[0])) \
         .withColumn("ingestionTimestamp", lit(df_raw.select("ingestionTimestamp").first()[0])) \
-        .withColumn("ingestion_date", lit(df_raw.select("ingestion_date").first()[0]))
+        .withColumn("ingestionDate", lit(df_raw.select("ingestionDate").first()[0]))
     
-    final_columns = ["ingestionTimestamp", "ingestion_date", "vendor", "product"] + \
-                    [c for c in final_df.columns if c not in ["vendor", "product", "ingestionTimestamp"]]
+    # Explicitly define column order
+    final_columns = [
+        "ingestionDate", "vendor", "product",
+        "cveId", "vulnStatus", "cvssData", "datePublished", "dateReserved", "dateUpdated", "datePublic",
+        "lastModified", "Descriptions", "ingestionTimestamp"
+    ]
+
+    # Select columns in the specified order
     final_df = final_df.select(*final_columns)
+
     add_log("Joined cvelistv5 and cvss data and added metadata columns.")
     
 except Exception as e:
@@ -285,18 +293,11 @@ except Exception as e:
 try:
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS glue_catalog.cve_db.cve_staging (
-            ingestionTimestamp timestamp,
-            ingestion_date date,
+            ingestionDate date,
             vendor string,
             product string,
             cveId string,
-            datePublished timestamp,
-            dateReserved timestamp,
-            dateUpdated timestamp,
-            datePublic timestamp,
-            lastModified timestamp,
             vulnStatus string,
-            Descriptions string,
             cvssData ARRAY<STRUCT<
                 source string,
                 type string,
@@ -305,10 +306,17 @@ try:
                 baseScore double,
                 impactScore double,
                 exploitabilityScore double
-            >>
+            >>,
+            datePublished timestamp,
+            dateReserved timestamp,
+            dateUpdated timestamp,
+            datePublic timestamp,
+            lastModified timestamp,
+            Descriptions string,
+            ingestionTimestamp timestamp
         ) USING ICEBERG
         LOCATION '{STAGING_S3_BUCKET}cve_iceberg_table/'
-        PARTITIONED BY (ingestion_date)
+        PARTITIONED BY (ingestionDate)
     """)
     add_log("Table cve_db.cve_staging created.")
     
