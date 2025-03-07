@@ -43,6 +43,47 @@ def add_log(msg):
 
 add_log("Starting main processing script.")
 
+# Get current date and set staging table name and location
+current_date = datetime.now(timezone.utc).strftime("%Y_%m_%d")
+staging_table_name = f"cve_staging_{current_date}"
+staging_table_location = f"{STAGING_S3_BUCKET}{staging_table_name}"
+
+#--------------------------------------------------------------------------------------------------#
+# Create staging table (if not exists) with dynamic name based on the current date
+#--------------------------------------------------------------------------------------------------#
+try:
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS glue_catalog.cve_db.{staging_table_name} (
+            ingestionDate date,
+            vendor string,
+            product string,
+            cveId string,
+            vulnStatus string,
+            cvssData ARRAY<STRUCT<
+                source string,
+                type string,
+                version string,
+                vectorString string,
+                baseScore double,
+                impactScore double,
+                exploitabilityScore double
+            >>,
+            datePublished timestamp,
+            dateReserved timestamp,
+            dateUpdated timestamp,
+            datePublic timestamp,
+            lastModified timestamp,
+            Descriptions string,
+            ingestionTimestamp timestamp
+        ) USING ICEBERG
+        LOCATION '{STAGING_S3_BUCKET}{staging_table_name}'
+        PARTITIONED BY (ingestionDate)
+    """)
+    add_log(f"Staging table glue_catalog.cve_db.{staging_table_name} created or already exists.")
+except Exception as e:
+    add_log(f"Error creating staging table: {str(e)}")
+    raise
+
 #--------------------------------------------------------------------------------------------------#
 # STEP 1: List S3 files using boto3 to identify latest ingestion day
 #--------------------------------------------------------------------------------------------------#
@@ -77,11 +118,11 @@ except Exception as e:
     raise
 
 #--------------------------------------------------------------------------------------------------#
-# STEP 2: Filter to latest file per vendor-product
+# STEP 2: Filter to latest file per vendor-product combo
 #--------------------------------------------------------------------------------------------------#
 try:
     pattern = re.compile(
-        r"raw_data/\d{4}-\d{2}-\d{2}/([^_]+)_cve_([^_]+)_raw_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.json$"
+        r"raw_data/\d{4}-\d{2}-\d{2}/([^_]+)_cve_([^_]+(?:_[^_]+)*)_raw_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.json$"
     )
     latest_files_dict = {}  # key: (vendor, product), value: (timestamp string, key)
     for key in files:
@@ -91,262 +132,184 @@ try:
             key_tuple = (vendor, product)
             if key_tuple not in latest_files_dict or ts_str > latest_files_dict[key_tuple][0]:
                 latest_files_dict[key_tuple] = (ts_str, key)
-    latest_files_paths = []
-    for key_tuple, (ts_str, key) in latest_files_dict.items():
-        file_path = f"s3://{bucket_name}/{key}"
-        latest_files_paths.append(file_path)
-        add_log(f"Latest file for {key_tuple}: {file_path}")
-    if not latest_files_paths:
+    if not latest_files_dict:
         raise Exception("No files matched expected naming convention.")
 except Exception as e:
     add_log(f"Error filtering latest files: {str(e)}")
     raise
 
 #--------------------------------------------------------------------------------------------------#
-# STEP 3: Read and combine JSON data
+# STEP 3: Process each vendor-product combo file individually and merge into staging table
 #--------------------------------------------------------------------------------------------------#
-try:
-    add_log("Reading JSON files from latest_files_paths...")
-    df_list = []
-    for path in latest_files_paths:
-        try:
-            temp_df = spark.read.option("multiline", "true").json(path)
-            temp_df = temp_df.withColumn("source_file", lit(path))
-            df_list.append(temp_df)
-            add_log(f"Successfully processed file: {path}")
-        except Exception as e:
-            add_log(f"Failed processing file {path}: {str(e)}")
-    if not df_list:
-        raise Exception("No valid JSON files were processed.")
-    df_raw = reduce(lambda df1, df2: df1.unionByName(df2), df_list)
-    add_log("Combined JSON files into df_raw.")
-except Exception as e:
-    add_log(f"Error reading JSON files: {str(e)}")
-    raise
-
-#--------------------------------------------------------------------------------------------------#
-# STEP 4: Extract metadata from source_file column
-#--------------------------------------------------------------------------------------------------#
-try:
-    df_raw = df_raw.withColumn("file_name", F.regexp_extract("source_file", r"([^/]+)$", 1))
-    df_raw = df_raw.withColumn(
-        "vendor", F.regexp_extract("file_name", r"^([^_]+)_cve_[^_]+_raw_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.json$", 1)
-    ).withColumn(
-        "product", F.regexp_extract("file_name", r"^[^_]+_cve_([^_]+)_raw_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.json$", 1)
-    ).withColumn(
-        "ingestionTimestamp_str", F.regexp_extract("file_name", r"_raw_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.json$", 1)
-    )
-    if df_raw.filter((col("vendor") == "") | (col("product") == "") | (col("ingestionTimestamp_str") == "")).count() > 0:
-        add_log("Warning: Some records have missing vendor, product, or ingestionTimestamp_str values.")
-    df_raw = df_raw.withColumn("ingestionTimestamp", 
+for (vendor, product), (ts_str, key) in latest_files_dict.items():
+    try:
+        file_path = f"s3://{bucket_name}/{key}"
+        add_log(f"Processing file for ({vendor}, {product}): {file_path}")
+        
+        # Read JSON file for this vendor-product combo
+        df_raw = spark.read.option("multiline", "true").json(file_path)
+        df_raw = df_raw.withColumn("source_file", lit(file_path))
+        
+        # Extract metadata from source_file column
+        df_raw = df_raw.withColumn("file_name", F.regexp_extract("source_file", r"([^/]+)$", 1))
+        df_raw = df_raw.withColumn(
+            "vendor", F.regexp_extract("file_name", r"^([^_]+)_cve_[^_]+_raw_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.json$", 1)
+        ).withColumn(
+            "product", F.regexp_extract("file_name", r"^[^_]+_cve_([^_]+)_raw_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.json$", 1)
+        ).withColumn(
+            "ingestionTimestamp_str", F.regexp_extract("file_name", r"_raw_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.json$", 1)
+        )
+        if df_raw.filter((col("vendor") == "") | (col("product") == "") | (col("ingestionTimestamp_str") == "")).count() > 0:
+            add_log("Warning: Some records have missing vendor, product, or ingestionTimestamp_str values.")
+        df_raw = df_raw.withColumn("ingestionTimestamp", 
                                F.to_timestamp(F.regexp_replace("ingestionTimestamp_str", "_", " "), "yyyy-MM-dd HH-mm-ss")
                               ).drop("ingestionTimestamp_str")
-    
-    # Create partition column from ingestionTimestamp
-    df_raw = df_raw.withColumn("ingestionDate", F.to_date("ingestionTimestamp"))
-    add_log("Extracted metadata (vendor, product, ingestionTimestamp, ingestionDate) from file names.")
-except Exception as e:
-    add_log(f"Error extracting metadata: {str(e)}")
-    raise
-
-#--------------------------------------------------------------------------------------------------#
-# STEP 5: Process JSON structures and convert date fields to timestamp
-#--------------------------------------------------------------------------------------------------#
-try:
-    # Process cvelistv5 data
-    cvelistv5_df = df_raw.select(explode("cvelistv5").alias("item")).select(
-        col("item")[0].alias("cveId"),
-        col("item")[1].alias("details_str")
-    )
-    cvelist_schema = StructType([
-        StructField("cveMetadata", StructType([
-            StructField("datePublished", StringType(), True),
-            StructField("dateReserved", StringType(), True),
-            StructField("dateUpdated", StringType(), True)
-        ]), True),
-        StructField("containers", StructType([
-            StructField("cna", StructType([
-                StructField("datePublic", StringType(), True)
-            ]), True)
-        ]), True)
-    ])
-    cvelistv5_df = cvelistv5_df.withColumn("details", from_json(col("details_str"), cvelist_schema)).select(
-        "cveId",
-        col("details.cveMetadata.datePublished").alias("datePublished"),
-        col("details.cveMetadata.dateReserved").alias("dateReserved"),
-        col("details.cveMetadata.dateUpdated").alias("dateUpdated"),
-        col("details.containers.cna.datePublic").alias("datePublic")
-    )
-    cvelistv5_df = cvelistv5_df.withColumn("datePublished", F.to_timestamp("datePublished")) \
-                                .withColumn("dateReserved", F.to_timestamp("dateReserved")) \
-                                .withColumn("dateUpdated", F.to_timestamp("dateUpdated")) \
-                                .withColumn("datePublic", F.to_timestamp("datePublic"))
-    
-    # Process fkie_nvd data
-    fkie_df = df_raw.select(explode("fkie_nvd").alias("item")).select(
-        col("item")[0].alias("id"),
-        col("item")[1].alias("details_str")
-    )
-    fkie_schema = StructType([
-        StructField("id", StringType(), True),
-        StructField("lastModified", StringType(), True),
-        StructField("vulnStatus", StringType(), True),
-        StructField("descriptions", ArrayType(StructType([
-            StructField("lang", StringType(), True),
-            StructField("value", StringType(), True)
-        ])), True),
-        StructField("metrics", MapType(StringType(), ArrayType(StructType([
-            StructField("source", StringType(), True),
-            StructField("type", StringType(), True),
-            StructField("cvssData", StructType([
-                StructField("version", StringType(), True),
-                StructField("vectorString", StringType(), True),
-                StructField("baseScore", DoubleType(), True)
-            ]), True),
-            StructField("exploitabilityScore", DoubleType(), True),
-            StructField("impactScore", DoubleType(), True)
-        ])), True))
-    ])
-    fkie_df = fkie_df.withColumn("details", from_json(col("details_str"), fkie_schema))
-    fkie_df = fkie_df.withColumn(
-        "englishDescription",
-        explode(expr("filter(details.descriptions, x -> x.lang = 'en')"))
-    ).select(
-        col("details.id").alias("cveId"),
-        col("details.lastModified").alias("lastModified"),
-        col("details.vulnStatus").alias("vulnStatus"),
-        col("englishDescription.value").alias("Descriptions"),
-        col("details.metrics").alias("cvssMetrics")
-    )
-    
-    fkie_df = fkie_df.withColumn("lastModified", F.to_timestamp("lastModified"))
-    
-    cvss_versions = [row["cvssVersion"] for row in fkie_df.select(explode(map_keys(col("cvssMetrics"))).alias("cvssVersion")).distinct().collect()]
-    cvss_dfs = []
-    for version in cvss_versions:
-        cvss_dfs.append(
-            fkie_df.select(
-                "cveId", "lastModified", "vulnStatus", "Descriptions",
-                explode(col(f"cvssMetrics.{version}")).alias("cvssEntry")
-            ).select(
-                "cveId", "lastModified", "vulnStatus", "Descriptions",
-                struct(
-                    col("cvssEntry.source").alias("source"),
-                    col("cvssEntry.type").alias("type"),
-                    col("cvssEntry.cvssData.version").alias("version"),
-                    col("cvssEntry.cvssData.vectorString").alias("vectorString"),
-                    col("cvssEntry.cvssData.baseScore").alias("baseScore"),
-                    col("cvssEntry.exploitabilityScore").alias("exploitabilityScore"),
-                    col("cvssEntry.impactScore").alias("impactScore")
-                ).alias("cvssData")
-            )
+        df_raw = df_raw.withColumn("ingestionDate", F.to_date("ingestionTimestamp"))
+        
+        # Process cvelistv5 data
+        cvelistv5_df = df_raw.select(explode("cvelistv5").alias("item")).select(
+            col("item")[0].alias("cveId"),
+            col("item")[1].alias("details_str")
         )
-    df_cvss_flattened = cvss_dfs[0]
-    for df in cvss_dfs[1:]:
-        df_cvss_flattened = df_cvss_flattened.unionByName(df)
-    df_cvss_combined = df_cvss_flattened.groupBy("cveId", "lastModified", "vulnStatus", "Descriptions").agg(
-        collect_list("cvssData").alias("cvssData")
-    ).withColumn("cvssData", array_distinct(col("cvssData")))
+        cvelist_schema = StructType([
+            StructField("cveMetadata", StructType([
+                StructField("datePublished", StringType(), True),
+                StructField("dateReserved", StringType(), True),
+                StructField("dateUpdated", StringType(), True)
+            ]), True),
+            StructField("containers", StructType([
+                StructField("cna", StructType([
+                    StructField("datePublic", StringType(), True)
+                ]), True)
+            ]), True)
+        ])
+        cvelistv5_df = cvelistv5_df.withColumn("details", from_json(col("details_str"), cvelist_schema)).select(
+            "cveId",
+            col("details.cveMetadata.datePublished").alias("datePublished"),
+            col("details.cveMetadata.dateReserved").alias("dateReserved"),
+            col("details.cveMetadata.dateUpdated").alias("dateUpdated"),
+            col("details.containers.cna.datePublic").alias("datePublic")
+        )
+        cvelistv5_df = cvelistv5_df.withColumn("datePublished", F.to_timestamp("datePublished")) \
+                                    .withColumn("dateReserved", F.to_timestamp("dateReserved")) \
+                                    .withColumn("dateUpdated", F.to_timestamp("dateUpdated")) \
+                                    .withColumn("datePublic", F.to_timestamp("datePublic"))
     
-    cvelistv5_df = cvelistv5_df.withColumn(
-        "cveId", F.regexp_replace(upper(trim(col("cveId"))), "[^\\x00-\\x7F]", "")
-    )
-    df_cvss_combined = df_cvss_combined.withColumn(
-        "cveId", F.regexp_replace(upper(trim(col("cveId"))), "[^\\x00-\\x7F]", "")
-    )
+        # Process fkie_nvd data
+        fkie_df = df_raw.select(explode("fkie_nvd").alias("item")).select(
+            col("item")[0].alias("id"),
+            col("item")[1].alias("details_str")
+        )
+        fkie_schema = StructType([
+            StructField("id", StringType(), True),
+            StructField("lastModified", StringType(), True),
+            StructField("vulnStatus", StringType(), True),
+            StructField("descriptions", ArrayType(StructType([
+                StructField("lang", StringType(), True),
+                StructField("value", StringType(), True)
+            ])), True),
+            StructField("metrics", MapType(StringType(), ArrayType(StructType([
+                StructField("source", StringType(), True),
+                StructField("type", StringType(), True),
+                StructField("cvssData", StructType([
+                    StructField("version", StringType(), True),
+                    StructField("vectorString", StringType(), True),
+                    StructField("baseScore", DoubleType(), True)
+                ]), True),
+                StructField("exploitabilityScore", DoubleType(), True),
+                StructField("impactScore", DoubleType(), True)
+            ])), True))
+        ])
+        fkie_df = fkie_df.withColumn("details", from_json(col("details_str"), fkie_schema))
+        fkie_df = fkie_df.withColumn(
+            "englishDescription",
+            explode(expr("filter(details.descriptions, x -> x.lang = 'en')"))
+        ).select(
+            col("details.id").alias("cveId"),
+            col("details.lastModified").alias("lastModified"),
+            col("details.vulnStatus").alias("vulnStatus"),
+            col("englishDescription.value").alias("Descriptions"),
+            col("details.metrics").alias("cvssMetrics")
+        )
+        
+        fkie_df = fkie_df.withColumn("lastModified", F.to_timestamp("lastModified"))
+        
+        cvss_versions = [row["cvssVersion"] for row in fkie_df.select(explode(map_keys(col("cvssMetrics"))).alias("cvssVersion")).distinct().collect()]
+        cvss_dfs = []
+        for version in cvss_versions:
+            cvss_dfs.append(
+                fkie_df.select(
+                    "cveId", "lastModified", "vulnStatus", "Descriptions",
+                    explode(col(f"cvssMetrics.{version}")).alias("cvssEntry")
+                ).select(
+                    "cveId", "lastModified", "vulnStatus", "Descriptions",
+                    struct(
+                        col("cvssEntry.source").alias("source"),
+                        col("cvssEntry.type").alias("type"),
+                        col("cvssEntry.cvssData.version").alias("version"),
+                        col("cvssEntry.cvssData.vectorString").alias("vectorString"),
+                        col("cvssEntry.cvssData.baseScore").alias("baseScore"),
+                        col("cvssEntry.exploitabilityScore").alias("exploitabilityScore"),
+                        col("cvssEntry.impactScore").alias("impactScore")
+                    ).alias("cvssData")
+                )
+            )
+        df_cvss_flattened = cvss_dfs[0]
+        for df in cvss_dfs[1:]:
+            df_cvss_flattened = df_cvss_flattened.unionByName(df)
+        df_cvss_combined = df_cvss_flattened.groupBy("cveId", "lastModified", "vulnStatus", "Descriptions").agg(
+            collect_list("cvssData").alias("cvssData")
+        ).withColumn("cvssData", array_distinct(col("cvssData")))
+        
+        cvelistv5_df = cvelistv5_df.withColumn(
+            "cveId", F.regexp_replace(upper(trim(col("cveId"))), "[^\\x00-\\x7F]", "")
+        )
+        df_cvss_combined = df_cvss_combined.withColumn(
+            "cveId", F.regexp_replace(upper(trim(col("cveId"))), "[^\\x00-\\x7F]", "")
+        )
     
-    add_log("Processed cvelistv5 and fkie_nvd JSON structures successfully.")
+        # Join datasets and add metadata columns
+        final_df = cvelistv5_df.join(df_cvss_combined, "cveId", "outer") \
+            .withColumn("vendor", lit(vendor)) \
+            .withColumn("product", lit(product)) \
+            .withColumn("ingestionTimestamp", lit(df_raw.select("ingestionTimestamp").first()[0])) \
+            .withColumn("ingestionDate", lit(df_raw.select("ingestionDate").first()[0]))
     
-except Exception as e:
-    add_log(f"Error processing JSON structures: {str(e)}")
-    raise
+        final_columns = [
+            "ingestionDate", "vendor", "product",
+            "cveId", "vulnStatus", "cvssData", "datePublished", "dateReserved", "dateUpdated", "datePublic",
+            "lastModified", "Descriptions", "ingestionTimestamp"
+        ]
+        final_df = final_df.select(*final_columns)
+    
+        # Merge (upsert) the processed data into the staging table
+        final_df.createOrReplaceTempView("final_data")
+        merge_sql = f"""
+        MERGE INTO glue_catalog.cve_db.{staging_table_name} as target
+        USING final_data as source
+        ON target.cveId = source.cveId
+        WHEN MATCHED AND (target.dateUpdated <> source.dateUpdated OR target.lastModified <> source.lastModified)
+          THEN UPDATE SET *
+        WHEN NOT MATCHED
+          THEN INSERT *
+        """
+        spark.sql(merge_sql)
+        add_log(f"Merge executed for ({vendor}, {product}).")
+    
+    except Exception as e:
+        add_log(f"Error processing file for ({vendor}, {product}): {str(e)}")
 
 #--------------------------------------------------------------------------------------------------#
-# STEP 6: Join datasets and add metadata
-#--------------------------------------------------------------------------------------------------#
-try:
-    final_df = cvelistv5_df.join(df_cvss_combined, "cveId", "outer") \
-        .withColumn("vendor", lit(df_raw.select("vendor").first()[0])) \
-        .withColumn("product", lit(df_raw.select("product").first()[0])) \
-        .withColumn("ingestionTimestamp", lit(df_raw.select("ingestionTimestamp").first()[0])) \
-        .withColumn("ingestionDate", lit(df_raw.select("ingestionDate").first()[0]))
-    
-    # Explicitly define column order
-    final_columns = [
-        "ingestionDate", "vendor", "product",
-        "cveId", "vulnStatus", "cvssData", "datePublished", "dateReserved", "dateUpdated", "datePublic",
-        "lastModified", "Descriptions", "ingestionTimestamp"
-    ]
-
-    # Select columns in the specified order
-    final_df = final_df.select(*final_columns)
-
-    add_log("Joined cvelistv5 and cvss data and added metadata columns.")
-    
-except Exception as e:
-    add_log(f"Error joining datasets: {str(e)}")
-    raise
-
-#--------------------------------------------------------------------------------------------------#
-# STEP 7: Create target Iceberg table and perform merge (upsert)
-#--------------------------------------------------------------------------------------------------#
-try:
-    spark.sql(f"""
-        CREATE TABLE IF NOT EXISTS glue_catalog.cve_db.cve_staging (
-            ingestionDate date,
-            vendor string,
-            product string,
-            cveId string,
-            vulnStatus string,
-            cvssData ARRAY<STRUCT<
-                source string,
-                type string,
-                version string,
-                vectorString string,
-                baseScore double,
-                impactScore double,
-                exploitabilityScore double
-            >>,
-            datePublished timestamp,
-            dateReserved timestamp,
-            dateUpdated timestamp,
-            datePublic timestamp,
-            lastModified timestamp,
-            Descriptions string,
-            ingestionTimestamp timestamp
-        ) USING ICEBERG
-        LOCATION '{STAGING_S3_BUCKET}cve_iceberg_table/'
-        PARTITIONED BY (ingestionDate)
-    """)
-    add_log("Table cve_db.cve_staging created.")
-    
-    final_df.createOrReplaceTempView("final_data")
-    merge_sql = """
-    MERGE INTO glue_catalog.cve_db.cve_staging as target
-    USING final_data as source
-    ON target.cveId = source.cveId
-    WHEN MATCHED AND (target.dateUpdated <> source.dateUpdated OR target.lastModified <> source.lastModified)
-      THEN UPDATE SET *
-    WHEN NOT MATCHED
-      THEN INSERT *
-    """
-    spark.sql(merge_sql)
-    add_log("Merge statement executed successfully; data upserted into cve_staging.")
-    
-except Exception as e:
-    add_log(f"Error during table creation or merge: {str(e)}")
-    raise
-
-#--------------------------------------------------------------------------------------------------#
-# STEP 8: Write log messages to a log file in the staging bucket
+# STEP 4: Write log messages to a log file in the staging_logs folder
 #--------------------------------------------------------------------------------------------------#
 try:
     log_content = "\n".join(log_messages)
+    log_file_key = f"staging_logs/staging_log_{current_date}.txt"
     s3_client.put_object(Bucket=LOG_S3_BUCKET.replace("s3://", "").split("/")[0],
-                         Key="cve_staging_log.txt", Body=log_content)
-    print("Log file written successfully to staging bucket.")
+                         Key=log_file_key, Body=log_content)
+    add_log("Log file written successfully to staging bucket.")
 except Exception as log_ex:
-    print("Failed writing log file: " + str(log_ex))
+    add_log("Failed writing log file: " + str(log_ex))
 
-print("Processing completed. Check cve_staging_log.txt in the staging bucket for details.")
+print("Processing completed. Check staging_logs folder in the staging bucket for log details.")
 job.commit()
