@@ -1,7 +1,7 @@
 import json
 import boto3
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Constants
 BASE_URL = "https://cve.circl.lu/api"
@@ -33,9 +33,10 @@ def store_data_in_s3(data, vendor, product):
         print("No data to store in S3.")
         return
 
-    # Generate a timestamped filename
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-    file_name = f"raw_data/{vendor}_{product}_{timestamp}.json"
+    # Generate a timestamped filename and ingestion day folder
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    ingestion_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    file_name = f"raw_data/{ingestion_day}/{vendor}_cve_{product}_raw_{timestamp}.json"
 
     # Convert data to JSON and upload to S3
     s3_client.put_object(
