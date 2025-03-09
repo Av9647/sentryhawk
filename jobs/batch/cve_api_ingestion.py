@@ -1,6 +1,7 @@
 import json
 import boto3
 import requests
+import urllib.parse  # Import URL encoder
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
 
@@ -39,7 +40,8 @@ def fetch_all_vendors():
 
 def fetch_products_for_vendor(vendor):
     """Call the List Products by Vendor API and return the list of products for a given vendor."""
-    url = f"{BASE_URL}/browse/{vendor}"
+    encoded_vendor = urllib.parse.quote(vendor)  # Encode vendor for URL
+    url = f"{BASE_URL}/browse/{encoded_vendor}"
     try:
         response = requests.get(url, timeout=10)
         print(f"DEBUG: Status code from {url} => {response.status_code}")
@@ -57,7 +59,9 @@ def fetch_products_for_vendor(vendor):
 
 def fetch_cve_data(vendor, product):
     """Call the Search CVEs by Product API and return the JSON response."""
-    url = f"{BASE_URL}/search/{vendor}/{product}"
+    encoded_vendor = urllib.parse.quote(vendor)    # Encode vendor
+    encoded_product = urllib.parse.quote(product)  # Encode product
+    url = f"{BASE_URL}/search/{encoded_vendor}/{encoded_product}"
     try:
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
