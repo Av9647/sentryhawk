@@ -2,6 +2,7 @@ import json
 import boto3
 import requests
 import urllib.parse  # Import URL encoder
+import re
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
 
@@ -9,10 +10,14 @@ from botocore.exceptions import ClientError
 BASE_URL = "https://cve.circl.lu/api"
 S3_BUCKET = "cve-api-raw-data"  # Change to your bucket name
 RAW_DATA_FOLDER = "raw_data"     # Folder for JSON files
-INGESTION_LOG_FOLDER = "ingestion logs"  # Folder for ingestion log files
+INGESTION_LOG_FOLDER = "ingestion_logs"  # Folder for ingestion log files
 
 # Initialize S3 client
 s3_client = boto3.client("s3")
+
+def sanitize(text):
+    """Replace any whitespace in text with underscores."""
+    return re.sub(r"\s+", "_", text)
 
 def log_message(log_list, message):
     """Append a timestamped message to log_list."""
@@ -48,7 +53,10 @@ def fetch_cve_data(vendor, product):
         if response.status_code == 200:
             return response.json()
         else:
+            # Log detailed information for troubleshooting.
             print(f"Error fetching CVE data for {vendor} - {product}: {response.status_code}")
+            print(f"URL: {url}")
+            print(f"Response text: {response.text[:500]}")
             return None
     except Exception as e:
         print(f"Exception fetching CVE data for {vendor} - {product}: {e}")
@@ -57,7 +65,11 @@ def fetch_cve_data(vendor, product):
 def store_data_in_s3(data, vendor, product, ingestion_day):
     """Store JSON data in S3 under raw_data/{ingestion_day}/."""
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-    file_key = f"{RAW_DATA_FOLDER}/{ingestion_day}/{vendor}_cve_{product}_raw_{timestamp}.json"
+    # Sanitize vendor, product, and ingestion_day to avoid spaces in the file key.
+    safe_vendor = sanitize(vendor)
+    safe_product = sanitize(product)
+    safe_ingestion_day = sanitize(ingestion_day)
+    file_key = f"{RAW_DATA_FOLDER}/{safe_ingestion_day}/{safe_vendor}_cve_{safe_product}_raw_{timestamp}.json"
     try:
         s3_client.put_object(
             Bucket=S3_BUCKET,
@@ -73,7 +85,8 @@ def update_ingestion_log(new_logs, ingestion_day):
     """Append new_logs to the ingestion log file stored in S3.
        Log file key: ingestion logs/ingestion_log_{ingestion_day}.txt
     """
-    log_file_key = f"{INGESTION_LOG_FOLDER}/ingestion_log_{ingestion_day}.txt"
+    safe_ingestion_day = sanitize(ingestion_day)
+    log_file_key = f"{INGESTION_LOG_FOLDER}/ingestion_log_{safe_ingestion_day}.txt"
     try:
         # Attempt to get the existing log
         existing_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=log_file_key)
@@ -95,8 +108,8 @@ def update_ingestion_log(new_logs, ingestion_day):
     )
 
 def lambda_handler(event, context):
-    # Expect vendor name to be passed in the event; use a default if not provided.
-    vendor = event.get("vendor", "meta")
+    # Get vendor from event, defaulting to "microsoft" if not provided.
+    vendor = event.get("vendor", "microsoft")
     ingestion_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     log_list = []
     log_message(log_list, f"Starting CVE data ingestion process for vendor: {vendor}.")
@@ -112,16 +125,21 @@ def lambda_handler(event, context):
     
     # Loop over each product for this vendor
     for product in products:
-        log_message(log_list, f"Fetching CVE data for {vendor} - {product}.")
-        cve_data = fetch_cve_data(vendor, product)
-        if cve_data is None:
-            log_message(log_list, f"Error: No CVE data returned for {vendor} - {product}.")
+        try:
+            log_message(log_list, f"Fetching CVE data for {vendor} - {product}.")
+            cve_data = fetch_cve_data(vendor, product)
+            if cve_data is None:
+                log_message(log_list, f"Error: No CVE data returned for {vendor} - {product}.")
+                continue
+            success, info = store_data_in_s3(cve_data, vendor, product, ingestion_day)
+            if success:
+                log_message(log_list, f"Stored data for {vendor} - {product} at: {info}")
+            else:
+                log_message(log_list, f"Failed to store data for {vendor} - {product}. Error: {info}")
+        except Exception as e:
+            # Catch any unexpected exceptions for a specific product
+            log_message(log_list, f"Unexpected error processing {vendor} - {product}: {e}")
             continue
-        success, info = store_data_in_s3(cve_data, vendor, product, ingestion_day)
-        if success:
-            log_message(log_list, f"Stored data for {vendor} - {product} at: {info}")
-        else:
-            log_message(log_list, f"Failed to store data for {vendor} - {product}. Error: {info}")
     
     log_message(log_list, "CVE data ingestion process completed.")
     
