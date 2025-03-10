@@ -15,9 +15,9 @@ from pyspark.sql.functions import (explode, col, upper, from_json, lit, expr, st
 from pyspark.sql.types import StructType, StructField, StringType, ArrayType, DoubleType, MapType
 
 # S3 bucket definitions
-RAW_S3_BUCKET = "s3://cve-api-raw-data/raw_data/"
-STAGING_S3_BUCKET = "s3://cve-api-staging-data/iceberg_tables/"
-LOG_S3_BUCKET = "s3://cve-api-staging-data/"
+SOURCE_BUCKET = "s3://cve-ingestion/cve_json/"
+STAGING_BUCKET = "s3://cve-staging/cve_staging_tables/"
+STAGING_LOG_BUCKET = "s3://cve-staging/"
 
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 sc = SparkContext()
@@ -27,7 +27,7 @@ glueContext = GlueContext(sc)
 spark = SparkSession.builder \
     .config("spark.sql.catalog.glue_catalog", "org.apache.iceberg.spark.SparkCatalog") \
     .config("spark.sql.catalog.glue_catalog.type", "glue") \
-    .config("spark.sql.catalog.glue_catalog.warehouse", STAGING_S3_BUCKET) \
+    .config("spark.sql.catalog.glue_catalog.warehouse", STAGING_BUCKET) \
     .config("spark.sql.iceberg.handle-timestamp-without-timezone", "true") \
     .config("hive.metastore.client.factory.class", "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory") \
     .enableHiveSupport() \
@@ -46,7 +46,7 @@ add_log("Starting main processing script.")
 # Get current date and set staging table name and location
 current_date = datetime.now(timezone.utc).strftime("%Y_%m_%d")
 staging_table_name = f"cve_staging_{current_date}"
-staging_table_location = f"{STAGING_S3_BUCKET}{staging_table_name}"
+staging_table_location = f"{STAGING_BUCKET}{staging_table_name}"
 
 #--------------------------------------------------------------------------------------------------#
 # Create staging table (if not exists) with dynamic name based on the current date
@@ -76,7 +76,7 @@ try:
             Descriptions string,
             ingestionTimestamp timestamp
         ) USING ICEBERG
-        LOCATION '{STAGING_S3_BUCKET}{staging_table_name}'
+        LOCATION '{STAGING_BUCKET}{staging_table_name}'
         PARTITIONED BY (ingestionDate)
     """)
     add_log(f"Staging table glue_catalog.cve_db.{staging_table_name} created or already exists.")
@@ -90,16 +90,16 @@ except Exception as e:
 try:
     add_log("Listing ingestion folders using boto3...")
     s3_client = boto3.client('s3')
-    bucket_name = "cve-api-raw-data"
-    prefix = "raw_data/"
+    bucket_name = "cve-ingestion"
+    prefix = "cve_json/"
     response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix, Delimiter='/')
     folders = [cp['Prefix'] for cp in response.get('CommonPrefixes', [])]
     add_log(f"Found folders: {folders}")
     
-    # Extract ingestion days (expecting format: raw_data/YYYY-MM-DD/)
+    # Extract ingestion days (expecting format: cve_json/YYYY-MM-DD/)
     ingestion_days = []
     for folder in folders:
-        m = re.search(r"raw_data/(\d{4}-\d{2}-\d{2})/", folder)
+        m = re.search(r"cve_json/(\d{4}-\d{2}-\d{2})/", folder)
         if m:
             ingestion_days.append(m.group(1))
     if not ingestion_days:
@@ -108,7 +108,7 @@ try:
     add_log(f"Latest ingestion day determined: {latest_day}")
     
     # List all objects in the latest day folder
-    latest_prefix = f"raw_data/{latest_day}/"
+    latest_prefix = f"cve_json/{latest_day}/"
     response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=latest_prefix)
     files = [obj["Key"] for obj in response.get("Contents", [])]
     add_log(f"Total files found in {latest_prefix}: {len(files)}")
@@ -122,7 +122,7 @@ except Exception as e:
 #--------------------------------------------------------------------------------------------------#
 try:
     pattern = re.compile(
-        r"raw_data/\d{4}-\d{2}-\d{2}/([^_]+)_cve_([^_]+(?:_[^_]+)*)_raw_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.json$"
+        r"cve_json/\d{4}-\d{2}-\d{2}/(.+)_cve_(.+)_raw_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.json$"
     )
     latest_files_dict = {}  # key: (vendor, product), value: (timestamp string, key)
     for key in files:
@@ -153,9 +153,17 @@ for (vendor, product), (ts_str, key) in latest_files_dict.items():
         # Extract metadata from source_file column
         df_raw = df_raw.withColumn("file_name", F.regexp_extract("source_file", r"([^/]+)$", 1))
         df_raw = df_raw.withColumn(
-            "vendor", F.regexp_extract("file_name", r"^([^_]+)_cve_[^_]+_raw_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.json$", 1)
+            "vendor", F.regexp_extract(
+                "file_name",
+                r"^(.+)_cve_.+_raw_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.json$",
+                1
+            )
         ).withColumn(
-            "product", F.regexp_extract("file_name", r"^[^_]+_cve_([^_]+)_raw_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.json$", 1)
+            "product", F.regexp_extract(
+                "file_name",
+                r"^.+_cve_(.+)_raw_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.json$",
+                1
+            )
         ).withColumn(
             "ingestionTimestamp_str", F.regexp_extract("file_name", r"_raw_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.json$", 1)
         )
@@ -304,12 +312,12 @@ for (vendor, product), (ts_str, key) in latest_files_dict.items():
 #--------------------------------------------------------------------------------------------------#
 try:
     log_content = "\n".join(log_messages)
-    log_file_key = f"staging_logs/staging_log_{current_date}.txt"
-    s3_client.put_object(Bucket=LOG_S3_BUCKET.replace("s3://", "").split("/")[0],
+    log_file_key = f"cve_staging_logs/staging_log_{current_date}.txt"
+    s3_client.put_object(Bucket=STAGING_LOG_BUCKET.replace("s3://", "").split("/")[0],
                          Key=log_file_key, Body=log_content)
     add_log("Log file written successfully to staging bucket.")
 except Exception as log_ex:
     add_log("Failed writing log file: " + str(log_ex))
 
-print("Processing completed. Check staging_logs folder in the staging bucket for log details.")
+print("Processing completed. Check cve_staging_logs folder in the staging bucket for log details.")
 job.commit()

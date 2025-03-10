@@ -2,22 +2,17 @@ import json
 import boto3
 import requests
 import urllib.parse  # Import URL encoder
-import re
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
 
 # Constants
 BASE_URL = "https://cve.circl.lu/api"
-S3_BUCKET = "cve-api-raw-data"  # Change to your bucket name
-RAW_DATA_FOLDER = "raw_data"     # Folder for JSON files
-INGESTION_LOG_FOLDER = "ingestion_logs"  # Folder for ingestion log files
+TARGET_S3_BUCKET = "cve-ingestion"  # Change to your bucket name
+JSON_FOLDER = "cve_json"     # Folder for JSON files
+INGESTION_LOG_FOLDER = "cve_ingestion_logs"  # Folder for ingestion log files
 
 # Initialize S3 client
 s3_client = boto3.client("s3")
-
-def sanitize(text):
-    """Replace whitespace characters in text with underscores."""
-    return re.sub(r"\s+", "_", text)
 
 def log_message(log_list, message):
     """Append a timestamped message to log_list."""
@@ -30,9 +25,11 @@ def fetch_all_vendors():
     try:
         response = requests.get(url, timeout=10)
         print(f"DEBUG: Status code from {url} => {response.status_code}")
-        print(f"DEBUG: Response text => {response.text[:500]}")
+        print(f"DEBUG: Response text => {response.text[:500]}")  # log first 500 chars
+
         if response.status_code == 200:
-            data = response.json()  # API returns a JSON list of vendor strings.
+            # The API returns a JSON list of vendor strings.
+            data = response.json()  
             return data if data else []
         else:
             print(f"DEBUG: Non-200 status code => {response.status_code}")
@@ -43,13 +40,14 @@ def fetch_all_vendors():
 
 def fetch_products_for_vendor(vendor):
     """Call the List Products by Vendor API and return the list of products for a given vendor."""
-    encoded_vendor = urllib.parse.quote(vendor)
+    encoded_vendor = urllib.parse.quote(vendor)  # Encode vendor for URL
     url = f"{BASE_URL}/browse/{encoded_vendor}"
     try:
         response = requests.get(url, timeout=10)
         print(f"DEBUG: Status code from {url} => {response.status_code}")
         print(f"DEBUG: Response text => {response.text[:500]}")
         if response.status_code == 200:
+            # Assume the API returns a JSON list of product names.
             data = response.json()
             return data if data else []
         else:
@@ -61,8 +59,8 @@ def fetch_products_for_vendor(vendor):
 
 def fetch_cve_data(vendor, product):
     """Call the Search CVEs by Product API and return the JSON response."""
-    encoded_vendor = urllib.parse.quote(vendor)
-    encoded_product = urllib.parse.quote(product)
+    encoded_vendor = urllib.parse.quote(vendor)    # Encode vendor
+    encoded_product = urllib.parse.quote(product)  # Encode product
     url = f"{BASE_URL}/search/{encoded_vendor}/{encoded_product}"
     try:
         response = requests.get(url, timeout=10)
@@ -76,16 +74,12 @@ def fetch_cve_data(vendor, product):
         return None
 
 def store_data_in_s3(data, vendor, product, ingestion_day):
-    """Store JSON data in S3 under raw_data/{ingestion_day}/."""
+    """Store JSON data in S3 under cve_json/{ingestion_day}/."""
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-    # Sanitize vendor, product, and ingestion_day to remove whitespace.
-    safe_vendor = sanitize(vendor)
-    safe_product = sanitize(product)
-    safe_ingestion_day = sanitize(ingestion_day)
-    file_key = f"{RAW_DATA_FOLDER}/{safe_ingestion_day}/{safe_vendor}_cve_{safe_product}_raw_{timestamp}.json"
+    file_key = f"{JSON_FOLDER}/{ingestion_day}/{vendor}_cve_{product}_raw_{timestamp}.json"
     try:
         s3_client.put_object(
-            Bucket=S3_BUCKET,
+            Bucket=TARGET_S3_BUCKET,
             Key=file_key,
             Body=json.dumps(data),
             ContentType="application/json"
@@ -96,21 +90,24 @@ def store_data_in_s3(data, vendor, product, ingestion_day):
 
 def update_ingestion_log(new_logs, ingestion_day):
     """Append new_logs to the ingestion log file stored in S3.
-       Log file key: ingestion logs/ingestion_log_{ingestion_day}.txt
+       Log file key: cve_ingestion logs/cve_ingestion_log_{ingestion_day}.txt
     """
-    safe_ingestion_day = sanitize(ingestion_day)
-    log_file_key = f"{INGESTION_LOG_FOLDER}/ingestion_log_{safe_ingestion_day}.txt"
+    log_file_key = f"{INGESTION_LOG_FOLDER}/cve_ingestion_log_{ingestion_day}.txt"
     try:
-        existing_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=log_file_key)
+        # Attempt to get the existing log
+        existing_obj = s3_client.get_object(Bucket=TARGET_S3_BUCKET, Key=log_file_key)
         existing_log = existing_obj["Body"].read().decode("utf-8")
     except ClientError as e:
+        # If the object doesn't exist, start with an empty log.
         if e.response['Error']['Code'] == "NoSuchKey":
             existing_log = ""
         else:
             existing_log = ""
+    # Combine logs with newline separation
     combined_log = existing_log + "\n" + "\n".join(new_logs) if existing_log else "\n".join(new_logs)
+    # Write back the log file
     s3_client.put_object(
-        Bucket=S3_BUCKET,
+        Bucket=TARGET_S3_BUCKET,
         Key=log_file_key,
         Body=combined_log,
         ContentType="text/plain"
@@ -121,6 +118,7 @@ def lambda_handler(event, context):
     log_list = []
     log_message(log_list, "Starting CVE data ingestion process.")
     
+    # Get the vendor list
     vendors = fetch_all_vendors()
     if not vendors:
         log_message(log_list, "No vendors fetched. Exiting process.")
@@ -129,6 +127,7 @@ def lambda_handler(event, context):
     
     log_message(log_list, f"Fetched {len(vendors)} vendors.")
     
+    # Loop over each vendor
     for vendor in vendors:
         log_message(log_list, f"Processing vendor: {vendor}")
         products = fetch_products_for_vendor(vendor)
@@ -137,6 +136,7 @@ def lambda_handler(event, context):
             continue
         log_message(log_list, f"Found {len(products)} products for vendor '{vendor}'.")
         
+        # Loop over each product for this vendor
         for product in products:
             log_message(log_list, f"Fetching CVE data for {vendor} - {product}.")
             cve_data = fetch_cve_data(vendor, product)
@@ -150,6 +150,8 @@ def lambda_handler(event, context):
                 log_message(log_list, f"Failed to store data for {vendor} - {product}. Error: {info}")
     
     log_message(log_list, "CVE data ingestion process completed.")
+    
+    # Write (or update) the ingestion log file in S3
     update_ingestion_log(log_list, ingestion_day)
     
     return {"statusCode": 200, "body": json.dumps("CVE data fetched and stored in S3 successfully!")}

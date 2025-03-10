@@ -8,9 +8,9 @@ from botocore.exceptions import ClientError
 
 # Constants
 BASE_URL = "https://cve.circl.lu/api"
-S3_BUCKET = "cve-api-raw-data"  # Change to your bucket name
-RAW_DATA_FOLDER = "raw_data"     # Folder for JSON files
-INGESTION_LOG_FOLDER = "ingestion_logs"  # Folder for ingestion log files
+TARGET_S3_BUCKET = "cve-ingestion"  # Change to your bucket name
+JSON_FOLDER = "cve_json"     # Folder for JSON files
+INGESTION_LOG_FOLDER = "cve_ingestion_logs"  # Folder for ingestion log files
 
 # Initialize S3 client
 s3_client = boto3.client("s3")
@@ -63,16 +63,16 @@ def fetch_cve_data(vendor, product):
         return None
 
 def store_data_in_s3(data, vendor, product, ingestion_day):
-    """Store JSON data in S3 under raw_data/{ingestion_day}/."""
+    """Store JSON data in S3 under cve_json/{ingestion_day}/."""
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
     # Sanitize vendor, product, and ingestion_day to avoid spaces in the file key.
     safe_vendor = sanitize(vendor)
     safe_product = sanitize(product)
     safe_ingestion_day = sanitize(ingestion_day)
-    file_key = f"{RAW_DATA_FOLDER}/{safe_ingestion_day}/{safe_vendor}_cve_{safe_product}_raw_{timestamp}.json"
+    file_key = f"{JSON_FOLDER}/{safe_ingestion_day}/{safe_vendor}_cve_{safe_product}_raw_{timestamp}.json"
     try:
         s3_client.put_object(
-            Bucket=S3_BUCKET,
+            Bucket=TARGET_S3_BUCKET,
             Key=file_key,
             Body=json.dumps(data),
             ContentType="application/json"
@@ -83,13 +83,13 @@ def store_data_in_s3(data, vendor, product, ingestion_day):
 
 def update_ingestion_log(new_logs, ingestion_day):
     """Append new_logs to the ingestion log file stored in S3.
-       Log file key: ingestion logs/ingestion_log_{ingestion_day}.txt
+       Log file key: cve_ingestion_logs/ingestion_log_{ingestion_day}.txt
     """
     safe_ingestion_day = sanitize(ingestion_day)
     log_file_key = f"{INGESTION_LOG_FOLDER}/ingestion_log_{safe_ingestion_day}.txt"
     try:
         # Attempt to get the existing log
-        existing_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=log_file_key)
+        existing_obj = s3_client.get_object(Bucket=TARGET_S3_BUCKET, Key=log_file_key)
         existing_log = existing_obj["Body"].read().decode("utf-8")
     except ClientError as e:
         # If the object doesn't exist, start with an empty log.
@@ -101,7 +101,7 @@ def update_ingestion_log(new_logs, ingestion_day):
     combined_log = existing_log + "\n" + "\n".join(new_logs) if existing_log else "\n".join(new_logs)
     # Write back the log file
     s3_client.put_object(
-        Bucket=S3_BUCKET,
+        Bucket=TARGET_S3_BUCKET,
         Key=log_file_key,
         Body=combined_log,
         ContentType="text/plain"
@@ -109,7 +109,7 @@ def update_ingestion_log(new_logs, ingestion_day):
 
 def lambda_handler(event, context):
     # Get vendor from event, defaulting to "microsoft" if not provided.
-    vendor = event.get("vendor", "microsoft")
+    vendor = event.get("vendor", "meta")
     ingestion_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     log_list = []
     log_message(log_list, f"Starting CVE data ingestion process for vendor: {vendor}.")
