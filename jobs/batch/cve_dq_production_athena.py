@@ -4,8 +4,9 @@ from datetime import datetime
 
 # AWS Athena Config
 ATHENA_DATABASE = "cve_db"
-ATHENA_OUTPUT = "s3://cve-api-staging-data/trino_results/"
+ATHENA_OUTPUT = "s3://cve-api-production-data/trino_results/"
 DQ_TABLE = "cve_dq_logs"
+PRODUCTION_TABLE = "cve_production"
 
 # Initialize Athena client
 athena_client = boto3.client("athena", region_name="us-east-1")
@@ -34,41 +35,31 @@ def run_athena_query(query):
     else:
         print(f"Query failed: {state}")
 
-# Step 1: Detect Latest Staging Table
-query_detect_staging = """
-SHOW TABLES IN glue_catalog.cve_db
-"""
-athena_client.start_query_execution(
-    QueryString=query_detect_staging,
-    QueryExecutionContext={"Database": ATHENA_DATABASE},
-    ResultConfiguration={"OutputLocation": ATHENA_OUTPUT}
-)
-
-# Assuming the output of SHOW TABLES is manually reviewed or fetched externally
-latest_staging_table = "cve_staging_2025_03_09"  # This would ideally be detected dynamically
-
-# Step 2: Run DQ Check on Latest Staging Table
+# Step 1: Run DQ Check on Production Table
 dq_query = f"""
 INSERT INTO glue_catalog.cve_db.{DQ_TABLE}
 SELECT 
     CURRENT_DATE AS dq_date,
-    'staging' AS dq_type,
-    '{latest_staging_table}' AS source_table,
+    'production' AS dq_type,
+    '{PRODUCTION_TABLE}' AS source_table,
     COUNT(*) AS total_records,
     SUM(CASE WHEN vendor IS NULL THEN 1 ELSE 0 END) AS null_vendor,
     SUM(CASE WHEN product IS NULL THEN 1 ELSE 0 END) AS null_product,
     SUM(CASE WHEN vulnStatus IS NULL THEN 1 ELSE 0 END) AS null_vulnStatus,
     SUM(CASE WHEN cvssData IS NULL THEN 1 ELSE 0 END) AS null_cvssData,
-    SUM(CASE WHEN ingestionTimestamp IS NULL THEN 1 ELSE 0 END) AS null_ingestionTimestamp,
+    SUM(CASE WHEN lastModified IS NULL THEN 1 ELSE 0 END) AS null_lastModified,
+    SUM(CASE WHEN valid_from IS NULL THEN 1 ELSE 0 END) AS null_valid_from,
+    SUM(CASE WHEN is_current IS NULL THEN 1 ELSE 0 END) AS null_is_current,
     -- Calculate percentages for monitoring thresholds
     (SUM(CASE WHEN vendor IS NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*)) AS pct_null_vendor,
     (SUM(CASE WHEN product IS NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*)) AS pct_null_product,
     (SUM(CASE WHEN vulnStatus IS NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*)) AS pct_null_vulnStatus,
-    (SUM(CASE WHEN cvssData IS NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*)) AS pct_null_cvssData
-FROM glue_catalog.cve_db.{latest_staging_table}
-WHERE ingestionDate = CURRENT_DATE;
+    (SUM(CASE WHEN cvssData IS NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*)) AS pct_null_cvssData,
+    (SUM(CASE WHEN lastModified IS NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*)) AS pct_null_lastModified
+FROM glue_catalog.cve_db.{PRODUCTION_TABLE}
+WHERE batch_date = CURRENT_DATE;
 """
 
 # Run the DQ Query
 run_athena_query(dq_query)
-print("Staging DQ results inserted into DQ logs table.")
+print("Production DQ results inserted into DQ logs table.")
