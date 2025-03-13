@@ -23,8 +23,11 @@ def fetch_vendor_list():
         log_message(f"DEBUG: Response text (truncated): {response.text[:500]}")
         if response.status_code == 200:
             data = response.json()
-            # The API returns a JSON object with a key 'vendor' that contains the list of vendors.
-            vendors = data.get("vendor", [])
+            # If data is a list, use it directly; otherwise, assume it's a dict with key 'vendor'
+            if isinstance(data, list):
+                vendors = data
+            else:
+                vendors = data.get("vendor", [])
             return vendors
         else:
             log_message(f"DEBUG: Non-200 status code received: {response.status_code}")
