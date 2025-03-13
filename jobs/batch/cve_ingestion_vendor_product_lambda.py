@@ -19,7 +19,6 @@ def fetch_product_list(vendor):
     Retrieve list of products for a given vendor from the CIRCL CVE Search API.
     Endpoint: https://cve.circl.lu/api/browse/{vendor}
     """
-    # URL encode the vendor name to safely include it in the URL
     encoded_vendor = urllib.parse.quote(vendor)
     url = f"https://cve.circl.lu/api/browse/{encoded_vendor}"
     try:
@@ -28,8 +27,11 @@ def fetch_product_list(vendor):
         log_message(f"DEBUG: Response text (truncated): {response.text[:500]}")
         if response.status_code == 200:
             data = response.json()
-            # The API returns a JSON object. Typically, the list of products is under the "product" key.
-            products = data.get("product", [])
+            # Handle both a list or a dict response
+            if isinstance(data, list):
+                products = data
+            else:
+                products = data.get("product", [])
             return products
         else:
             log_message(f"DEBUG: Non-200 status code received: {response.status_code}")

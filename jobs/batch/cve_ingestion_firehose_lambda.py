@@ -10,10 +10,13 @@ from datetime import datetime, timezone
 firehose = boto3.client('firehose')
 
 # Environment variable for Firehose delivery stream name
-STREAM_NAME = os.environ['cve_ingestion_firehose']
+STREAM_NAME = os.environ['FIREHOSE_STREAM_NAME']
 
-# Record size limit: 1 MB (Firehose max record size)
+# Record size limit: 1 MB (Firehose max record size is 1,024,000 bytes)
 MAX_RECORD_SIZE = 1 * 1024 * 1024  # 1 MB in bytes
+
+# Safety margin (10 KB) to leave room for overhead and newline
+SAFETY_MARGIN = 10 * 1024  # 10 KB
 
 def log_message(message):
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -32,7 +35,7 @@ def fetch_cve_data(vendor, product):
     encoded_product = urllib.parse.quote(product)
     url = f"https://cve.circl.lu/api/search/{encoded_vendor}/{encoded_product}"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=30)
         log_message(f"Fetched CVE data for {vendor}-{product} (status {response.status_code})")
         if response.status_code == 200:
             data = response.json()
@@ -49,53 +52,75 @@ def fetch_cve_data(vendor, product):
         log_message(f"Exception fetching CVE data for {vendor}-{product}: {e}")
         return {}
 
+def split_chunk_to_fit(candidate, key, max_size):
+    """
+    Given a candidate record that is too large, reduce the number of items in candidate[key]
+    by halving, until the serialized size fits within max_size.
+    """
+    items = candidate[key]
+    while measure_json_size(candidate) > max_size and len(items) > 1:
+        new_count = max(1, len(items) // 2)
+        candidate[key] = items[:new_count]
+        items = candidate[key]
+    return candidate
+
 def split_record(record, max_size):
     """
-    If the record (with vendor, product, and data) exceeds max_size,
-    split it recursively along the largest top-level list.
-    Returns a list of records (each guaranteed to be <= max_size if possible).
+    Splits a record if its JSON size exceeds max_size.
+    This function computes the overhead (base record without large keys),
+    estimates how many items can fit, and splits the largest list accordingly.
+    If a chunk still exceeds the size limit, it further reduces the chunk.
     """
     current_size = measure_json_size(record)
     if current_size <= max_size:
         return [record]
     
-    if isinstance(record, dict):
-        # Identify the largest list among keys 'cvelistv5' or 'fkie_nvd'
-        largest_key = None
-        largest_len = 0
-        for key in ["cvelistv5", "fkie_nvd"]:
-            value = record.get(key)
-            if isinstance(value, list) and len(value) > largest_len:
-                largest_key = key
-                largest_len = len(value)
-        if largest_key is None:
-            log_message("WARNING: Record too large but no list found to split; returning as-is.")
-            return [record]
-        big_list = record[largest_key]
-        num_chunks = (current_size // max_size) + 1
-        chunk_size = len(big_list) // num_chunks
-        if chunk_size == 0:
-            chunk_size = 1
-        chunks = []
-        for i in range(0, len(big_list), chunk_size):
-            subset = big_list[i:i+chunk_size]
-            new_record = record.copy()
-            new_record[largest_key] = subset
-            chunks.extend(split_record(new_record, max_size))
-        return chunks
+    # Candidate keys holding large data
+    candidate_keys = ["cvelistv5", "fkie_nvd"]
+    # Build base record (exclude candidate keys)
+    base_record = {k: record[k] for k in record if k not in candidate_keys}
+    overhead = measure_json_size(base_record)
     
-    if isinstance(record, list):
-        num_chunks = (measure_json_size(record) // max_size) + 1
-        chunk_size = len(record) // num_chunks
-        if chunk_size == 0:
-            chunk_size = 1
-        results = []
-        for i in range(0, len(record), chunk_size):
-            subset = record[i:i+chunk_size]
-            results.extend(split_record(subset, max_size))
-        return results
+    # Identify the largest key among candidate_keys
+    largest_key = None
+    largest_len = 0
+    for key in candidate_keys:
+        value = record.get(key)
+        if isinstance(value, list) and len(value) > largest_len:
+            largest_key = key
+            largest_len = len(value)
+    if largest_key is None:
+        log_message("WARNING: Record too large and no splittable key found; returning as-is.")
+        return [record]
+    
+    big_list = record[largest_key]
+    if not big_list:
+        return [record]
+    
+    # Estimate average size per item
+    sample_item = big_list[0]
+    sample_size = measure_json_size(sample_item)
+    if sample_size == 0:
+        sample_size = 1
+    
+    # Compute available size for items after subtracting overhead and safety margin
+    available_size = max_size - overhead - SAFETY_MARGIN
+    max_items = available_size // sample_size if available_size >= sample_size else 1
 
-    return [record]
+    log_message(f"Splitting using key '{largest_key}', overhead={overhead} bytes, "
+                f"sample_size={sample_size} bytes, initial max_items per chunk={max_items}")
+    
+    chunks = []
+    total_items = len(big_list)
+    for i in range(0, total_items, max_items):
+        new_record = base_record.copy()
+        new_record[largest_key] = big_list[i:i+max_items]
+        # Ensure the new record fits within max_size; if not, reduce further.
+        if measure_json_size(new_record) > max_size:
+            new_record = split_chunk_to_fit(new_record, largest_key, max_size)
+        chunks.append(new_record)
+    
+    return chunks
 
 def lambda_handler(event, context):
     records = event.get("Records", [])
@@ -121,7 +146,7 @@ def lambda_handler(event, context):
         # Fetch and filter CVE data; result will have keys "cvelistv5" and/or "fkie_nvd"
         data = fetch_cve_data(vendor, product)
         
-        # Build the record structure with ingestion metadata
+        # Build the record with metadata
         record = {
             "vendor": vendor,
             "product": product,
@@ -131,14 +156,17 @@ def lambda_handler(event, context):
             "ingestionDate": datetime.now(timezone.utc).strftime("%Y-%m-%d")
         }
         
-        # Split the record if its JSON size exceeds 1 MB
+        # Split record if needed
         record_chunks = split_record(record, MAX_RECORD_SIZE)
         log_message(f"Data for {vendor}-{product} split into {len(record_chunks)} chunk(s).")
         
-        # For each chunk, serialize as NDJSON record and add to Firehose batch
+        # Serialize each chunk and add to Firehose batch if within limit
         for chunk in record_chunks:
             record_str = json.dumps(chunk) + "\n"
             encoded_record = record_str.encode('utf-8')
+            if len(encoded_record) > 1024000:
+                log_message("Warning: Chunk size still exceeds Firehose limit; skipping this chunk.")
+                continue
             firehose_records.append({'Data': encoded_record})
     
     # Send records to Firehose in batches (max 500 records per batch)
