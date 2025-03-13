@@ -2,6 +2,7 @@ import os
 import boto3
 import json
 import sys
+import math
 import requests
 import urllib.parse
 from datetime import datetime, timezone
@@ -12,11 +13,14 @@ firehose = boto3.client('firehose')
 # Environment variable for Firehose delivery stream name
 STREAM_NAME = os.environ['FIREHOSE_STREAM_NAME']
 
-# Record size limit: 1 MB (Firehose max record size is 1,024,000 bytes)
+# Record size limit for each individual record: 1 MB (Firehose max record size is 1,024,000 bytes)
 MAX_RECORD_SIZE = 1 * 1024 * 1024  # 1 MB in bytes
 
-# Safety margin (10 KB) to leave room for overhead and newline
+# Safety margin (e.g., 10 KB) to leave room for overhead and newline
 SAFETY_MARGIN = 10 * 1024  # 10 KB
+
+# Maximum total batch size for PutRecordBatch is 4 MB.
+MAX_BATCH_BYTES = 4 * 1024 * 1024  # 4 MB in bytes
 
 def log_message(message):
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -52,75 +56,121 @@ def fetch_cve_data(vendor, product):
         log_message(f"Exception fetching CVE data for {vendor}-{product}: {e}")
         return {}
 
-def split_chunk_to_fit(candidate, key, max_size):
+def recursive_split(record, max_size):
     """
-    Given a candidate record that is too large, reduce the number of items in candidate[key]
-    by halving, until the serialized size fits within max_size.
+    Recursively splits the record along the candidate key (whose value is a list)
+    that contributes the most to the record size, until the JSON-serialized record
+    (with a newline) is under Firehose's size limit.
+    This function preserves all data.
     """
-    items = candidate[key]
-    while measure_json_size(candidate) > max_size and len(items) > 1:
-        new_count = max(1, len(items) // 2)
-        candidate[key] = items[:new_count]
-        items = candidate[key]
-    return candidate
+    encoded = (json.dumps(record) + "\n").encode('utf-8')
+    if len(encoded) <= 1024000:
+        return [record]
+    
+    candidate_keys = [k for k, v in record.items() if isinstance(v, list) and len(v) > 1]
+    if not candidate_keys:
+        log_message("WARNING: Record too large and no candidate key to split; returning as-is.")
+        return [record]
+    
+    max_contrib = 0
+    key_to_split = None
+    for key in candidate_keys:
+        contrib = measure_json_size({key: record[key]})
+        if contrib > max_contrib:
+            max_contrib = contrib
+            key_to_split = key
+    if key_to_split is None:
+        return [record]
+    
+    lst = record[key_to_split]
+    mid = len(lst) // 2
+    rec1 = record.copy()
+    rec2 = record.copy()
+    rec1[key_to_split] = lst[:mid]
+    rec2[key_to_split] = lst[mid:]
+    
+    return recursive_split(rec1, max_size) + recursive_split(rec2, max_size)
 
-def split_record(record, max_size):
+def even_split_record(record, max_size):
     """
-    Splits a record if its JSON size exceeds max_size.
-    This function computes the overhead (base record without large keys),
-    estimates how many items can fit, and splits the largest list accordingly.
-    If a chunk still exceeds the size limit, it further reduces the chunk.
+    Splits the record evenly based on total size.
+    This function estimates the number of chunks needed based on the record's size
+    and splits each candidate key (list-type) evenly.
+    If any chunk still exceeds max_size, it is recursively split.
     """
     current_size = measure_json_size(record)
     if current_size <= max_size:
         return [record]
     
-    # Candidate keys holding large data
-    candidate_keys = ["cvelistv5", "fkie_nvd"]
-    # Build base record (exclude candidate keys)
+    candidate_keys = [k for k, v in record.items() if isinstance(v, list)]
     base_record = {k: record[k] for k in record if k not in candidate_keys}
-    overhead = measure_json_size(base_record)
+    base_size = measure_json_size(base_record)
+    if base_size + SAFETY_MARGIN >= max_size:
+        log_message("WARNING: Base record itself is too large!")
+        return [record]
     
-    # Identify the largest key among candidate_keys
-    largest_key = None
-    largest_len = 0
+    desired_chunks = math.ceil(current_size / (max_size - SAFETY_MARGIN))
+    log_message(f"Even splitting into {desired_chunks} chunk(s) based on total size {current_size} bytes.")
+    
+    split_data = {}
     for key in candidate_keys:
-        value = record.get(key)
-        if isinstance(value, list) and len(value) > largest_len:
-            largest_key = key
-            largest_len = len(value)
-    if largest_key is None:
-        log_message("WARNING: Record too large and no splittable key found; returning as-is.")
-        return [record]
-    
-    big_list = record[largest_key]
-    if not big_list:
-        return [record]
-    
-    # Estimate average size per item
-    sample_item = big_list[0]
-    sample_size = measure_json_size(sample_item)
-    if sample_size == 0:
-        sample_size = 1
-    
-    # Compute available size for items after subtracting overhead and safety margin
-    available_size = max_size - overhead - SAFETY_MARGIN
-    max_items = available_size // sample_size if available_size >= sample_size else 1
-
-    log_message(f"Splitting using key '{largest_key}', overhead={overhead} bytes, "
-                f"sample_size={sample_size} bytes, initial max_items per chunk={max_items}")
+        lst = record.get(key, [])
+        n = len(lst)
+        chunk_size = math.ceil(n / desired_chunks) if desired_chunks > 0 else n
+        split_data[key] = [lst[i:i+chunk_size] for i in range(0, n, chunk_size)]
+        while len(split_data[key]) < desired_chunks:
+            split_data[key].append([])
     
     chunks = []
-    total_items = len(big_list)
-    for i in range(0, total_items, max_items):
-        new_record = base_record.copy()
-        new_record[largest_key] = big_list[i:i+max_items]
-        # Ensure the new record fits within max_size; if not, reduce further.
-        if measure_json_size(new_record) > max_size:
-            new_record = split_chunk_to_fit(new_record, largest_key, max_size)
-        chunks.append(new_record)
+    for i in range(desired_chunks):
+        new_chunk = base_record.copy()
+        for key in candidate_keys:
+            new_chunk[key] = split_data[key][i] if i < len(split_data[key]) else []
+        if measure_json_size(new_chunk) + SAFETY_MARGIN > max_size:
+            sub_chunks = even_split_record(new_chunk, max_size)
+            chunks.extend(sub_chunks)
+        else:
+            chunks.append(new_chunk)
     
     return chunks
+
+def split_record(record, max_size):
+    """
+    Attempts an even split first; if that produces any chunk still over the limit,
+    falls back to recursive splitting on that chunk.
+    """
+    chunks = even_split_record(record, max_size)
+    final_chunks = []
+    for chunk in chunks:
+        encoded = (json.dumps(chunk) + "\n").encode('utf-8')
+        if len(encoded) > 1024000:
+            sub_chunks = recursive_split(chunk, max_size)
+            final_chunks.extend(sub_chunks)
+        else:
+            final_chunks.append(chunk)
+    return final_chunks
+
+def create_batches(records, max_batch_bytes):
+    """
+    Groups the list of Firehose records (each a dict with key 'Data')
+    into batches such that the total byte size of each batch does not exceed max_batch_bytes.
+    Returns a list of batches (each a list of records).
+    """
+    batches = []
+    current_batch = []
+    current_size = 0
+    for rec in records:
+        rec_size = len(rec['Data'])
+        # If adding this record would exceed the max, finalize the current batch.
+        if current_size + rec_size > max_batch_bytes and current_batch:
+            batches.append(current_batch)
+            current_batch = []
+            current_size = 0
+        current_batch.append(rec)
+        current_size += rec_size
+    if current_batch:
+        batches.append(current_batch)
+    return batches
 
 def lambda_handler(event, context):
     records = event.get("Records", [])
@@ -143,37 +193,37 @@ def lambda_handler(event, context):
             log_message("Message missing vendor or product.")
             continue
         
-        # Fetch and filter CVE data; result will have keys "cvelistv5" and/or "fkie_nvd"
+        # Fetch CVE data
         data = fetch_cve_data(vendor, product)
         
-        # Build the record with metadata
+        # Build the complete record with ingestion metadata.
         record = {
             "vendor": vendor,
             "product": product,
-            "cvelistv5": data.get("cvelistv5"),
-            "fkie_nvd": data.get("fkie_nvd"),
+            "cvelistv5": data.get("cvelistv5", []),
+            "fkie_nvd": data.get("fkie_nvd", []),
             "ingestionTimestamp": datetime.now(timezone.utc).isoformat(),
             "ingestionDate": datetime.now(timezone.utc).strftime("%Y-%m-%d")
         }
         
-        # Split record if needed
+        # Split the record so that each chunk is under MAX_RECORD_SIZE.
         record_chunks = split_record(record, MAX_RECORD_SIZE)
         log_message(f"Data for {vendor}-{product} split into {len(record_chunks)} chunk(s).")
         
-        # Serialize each chunk and add to Firehose batch if within limit
         for chunk in record_chunks:
             record_str = json.dumps(chunk) + "\n"
             encoded_record = record_str.encode('utf-8')
             if len(encoded_record) > 1024000:
-                log_message("Warning: Chunk size still exceeds Firehose limit; skipping this chunk.")
+                log_message("Warning: A chunk still exceeds Firehose limit; skipping this chunk.")
                 continue
             firehose_records.append({'Data': encoded_record})
     
-    # Send records to Firehose in batches (max 500 records per batch)
-    MAX_BATCH = 500
+    # Create batches that do not exceed MAX_BATCH_BYTES (4 MB).
+    batches = create_batches(firehose_records, MAX_BATCH_BYTES)
+    log_message(f"Total firehose records: {len(firehose_records)} split into {len(batches)} batch(es).")
+    
     total_sent = 0
-    for i in range(0, len(firehose_records), MAX_BATCH):
-        batch = firehose_records[i:i+MAX_BATCH]
+    for batch in batches:
         try:
             response = firehose.put_record_batch(DeliveryStreamName=STREAM_NAME, Records=batch)
             failed = response.get("FailedPutCount", 0)
