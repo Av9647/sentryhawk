@@ -116,7 +116,7 @@ def even_split_record(record, max_size):
     for key in candidate_keys:
         lst = record.get(key, [])
         n = len(lst)
-        chunk_size = math.ceil(n / desired_chunks) if desired_chunks > 0 else n
+        chunk_size = max(1, math.ceil(n / desired_chunks)) if desired_chunks > 0 else n
         split_data[key] = [lst[i:i+chunk_size] for i in range(0, n, chunk_size)]
         while len(split_data[key]) < desired_chunks:
             split_data[key].append([])

@@ -22,7 +22,7 @@ def fetch_product_list(vendor):
     encoded_vendor = urllib.parse.quote(vendor)
     url = f"https://cve.circl.lu/api/browse/{encoded_vendor}"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=30)
         log_message(f"DEBUG: Fetched products for vendor '{vendor}' with status code {response.status_code}")
         log_message(f"DEBUG: Response text (truncated): {response.text[:500]}")
         if response.status_code == 200:
