@@ -119,7 +119,8 @@ except Exception as e:
 #------------------------------------------------------------------------------
 # STEP 2: Define explicit schema for NDJSON files
 #------------------------------------------------------------------------------
-# NOTE: 'metrics' is an array of objects, each may have 'cvssV3_1' as a single struct
+# NOTE: adp is an ARRAY because your screenshot shows adp[0], adp[1], etc.
+# Inside each adp item, there's a 'metrics' array with 'cvssV3_1'.
 cvelist_schema = StructType([
     StructField("cveMetadata", StructType([
         StructField("datePublished", StringType(), True),
@@ -134,20 +135,24 @@ cvelist_schema = StructType([
                 StructField("value", StringType(), True)
             ])), True),
             StructField("metrics", ArrayType(StructType([
-                StructField("format", StringType(), True),
-                StructField("scenarios", ArrayType(StructType([
-                    StructField("lang", StringType(), True),
-                    StructField("value", StringType(), True)
-                ])), True),
                 StructField("cvssV3_1", StructType([
                     StructField("version", StringType(), True),
                     StructField("vectorString", StringType(), True),
-                    StructField("baseScore", DoubleType(), True),
-                    StructField("impactScore", DoubleType(), True),
-                    StructField("exploitabilityScore", DoubleType(), True)
+                    StructField("baseScore", DoubleType(), True)
                 ]), True)
             ])), True)
-        ]), True)
+        ]), True),
+        StructField("adp", ArrayType(StructType([
+            # Each item in the adp array may have a metrics array
+            StructField("metrics", ArrayType(StructType([
+                StructField("cvssV3_1", StructType([
+                    StructField("version", StringType(), True),
+                    StructField("vectorString", StringType(), True),
+                    StructField("baseScore", DoubleType(), True)
+                ]), True)
+            ])), True)
+            # If your JSON has other fields (title, references, etc.) you can add them here
+        ])), True)
     ]), True)
 ])
 
@@ -198,7 +203,7 @@ raw_count = df_raw.count()
 add_log(f"JSON chunk count: {raw_count}")
 
 #------------------------------------------------------------------------------
-# STEP 4a: Process cvelistv5 (pull cvssV3_1 as fallback)
+# STEP 4a: Process cvelistv5
 #------------------------------------------------------------------------------
 cvelistv5_df = df_raw.select(
     "vendor", "product", "ingestionTimestamp", "ingestionDate",
@@ -221,15 +226,30 @@ cvelistv5_df = cvelistv5_df.select(
     col("details.cveMetadata.dateUpdated").alias("dateUpdated"),
     col("details.containers.cna.datePublic").alias("datePublic"),
     col("details.containers.cna.descriptions").alias("raw_alt_descriptions"),
-    # Rename metrics to raw_metrics
-    col("details.containers.cna.metrics").alias("raw_metrics")
+    # cna.metrics is an array of objects
+    col("details.containers.cna.metrics").alias("cna_metrics"),
+    # adp is an array of objects; each object might have its own 'metrics' array
+    col("details.containers.adp").alias("adp_array")
 )
 
-# Explode metrics array (outer to keep rows even if empty)
-cvelistv5_df = cvelistv5_df.withColumn("metric_item", explode_outer("raw_metrics"))
+# Explode cna metrics
+cvelistv5_df = cvelistv5_df.withColumn("cna_metric", explode_outer("cna_metrics"))
 
-# Extract cvssV3_1 from each metric_item
-cvelistv5_df = cvelistv5_df.withColumn("raw_alt_cvss", col("metric_item.cvssV3_1"))
+# Explode adp array
+cvelistv5_df = cvelistv5_df.withColumn("adp_item", explode_outer("adp_array"))
+cvelistv5_df = cvelistv5_df.withColumn("adp_metrics", col("adp_item.metrics"))
+
+# Explode each adp_item.metrics
+cvelistv5_df = cvelistv5_df.withColumn("adp_metric", explode_outer("adp_metrics"))
+
+# Now pick whichever CVSS data is present: cna_metric first, else adp_metric
+cvelistv5_df = cvelistv5_df.withColumn(
+    "raw_alt_cvss",
+    F.coalesce(
+        col("cna_metric.cvssV3_1"),
+        col("adp_metric.cvssV3_1")
+    )
+)
 
 # Convert date fields to timestamp
 cvelistv5_df = cvelistv5_df.withColumn("datePublished", F.to_timestamp("datePublished")) \
@@ -243,7 +263,7 @@ cvelistv5_df = cvelistv5_df.withColumn(
     expr("filter(raw_alt_descriptions, x -> x.lang like 'en%')")
 )
 
-# Transform cvssV3_1 struct into a single-element array alt_cvssData
+# Turn the raw_alt_cvss struct into a single-element array
 cvelistv5_df = cvelistv5_df.withColumn(
     "alt_cvssData",
     when(
@@ -256,15 +276,15 @@ cvelistv5_df = cvelistv5_df.withColumn(
                 'version', raw_alt_cvss.version,
                 'vectorString', raw_alt_cvss.vectorString,
                 'baseScore', raw_alt_cvss.baseScore,
-                'exploitabilityScore', raw_alt_cvss.exploitabilityScore,
-                'impactScore', raw_alt_cvss.impactScore
+                'exploitabilityScore', cast(null as double),
+                'impactScore', cast(null as double)
               )
             """)
         )
     ).otherwise(F.array())
 )
 
-# Group by (vendor, product, cveId, etc.) so multiple metrics become a single array
+# Group by to combine multiple metrics into one array
 cvelistv5_grouped = cvelistv5_df.groupBy(
     "vendor", "product", "cveId",
     "ingestionTimestamp", "ingestionDate",
