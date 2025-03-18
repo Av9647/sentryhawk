@@ -1,6 +1,4 @@
-import sys
-import re
-import boto3
+import sys, re, boto3
 from datetime import datetime, timezone
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
@@ -9,13 +7,12 @@ from awsglue.job import Job
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
 from pyspark.sql.functions import (
-    explode, explode_outer, col, upper, from_json, lit, expr, struct,
+    explode, explode_outer, col, upper, from_json, expr, struct,
     collect_list, array, array_distinct, map_keys, trim, regexp_replace,
     input_file_name, when, flatten, size
 )
 from pyspark.sql.types import (
-    StructType, StructField, StringType, ArrayType,
-    DoubleType, TimestampType, MapType
+    StructType, StructField, StringType, ArrayType, DoubleType, MapType
 )
 
 # --- S3 Definitions ---
@@ -28,7 +25,6 @@ args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = SparkSession.builder \
-    .config("spark.eventLog.enabled", "false") \
     .config("spark.sql.catalog.glue_catalog", "org.apache.iceberg.spark.SparkCatalog") \
     .config("spark.sql.catalog.glue_catalog.type", "glue") \
     .config("spark.sql.catalog.glue_catalog.warehouse", STAGING_BUCKET) \
@@ -129,6 +125,7 @@ cvelist_schema = StructType([
 
 fkie_schema = StructType([
     StructField("id", StringType(), True),
+    StructField("published", StringType(), True),
     StructField("lastModified", StringType(), True),
     StructField("vulnStatus", StringType(), True),
     StructField("descriptions", ArrayType(StructType([
@@ -323,12 +320,14 @@ fkie_df = df_raw.select(
  .select(
     "vendor", "product", "ingestionTimestamp", "ingestionDate",
     col("details.id").alias("cveId"),
+    col("details.published").alias("published"),
     col("details.lastModified").alias("lastModified"),
     col("details.vulnStatus").alias("vulnStatus"),
     col("englishDescription.value").alias("Descriptions"),
     col("details.metrics").alias("cvssMetrics"),
     col("details.weaknesses").alias("weaknesses")
-).withColumn("lastModified", F.to_timestamp("lastModified"))
+).withColumn("lastModified", F.to_timestamp("lastModified")) \
+ .withColumn("published", F.to_timestamp("published"))
 
 add_log(f"fkie_df record count: {fkie_df.count()}")
 
@@ -341,11 +340,11 @@ cvss_dfs = []
 for version in cvss_versions:
     tmp_df = fkie_df.select(
         "vendor", "product", "ingestionTimestamp", "ingestionDate", "cveId",
-        "lastModified", "vulnStatus", "Descriptions", "weaknesses",
+        "lastModified", "vulnStatus", "Descriptions", "weaknesses", "published",
         explode(col(f"cvssMetrics.{version}")).alias("cvssEntry")
     ).select(
         "vendor", "product", "ingestionTimestamp", "ingestionDate", "cveId",
-        "lastModified", "vulnStatus", "Descriptions", "weaknesses",
+        "lastModified", "vulnStatus", "Descriptions", "weaknesses", "published",
         struct(
             col("cvssEntry.source").alias("source"),
             col("cvssEntry.type").alias("type"),
@@ -364,7 +363,7 @@ if cvss_dfs:
         df_cvss_flattened = df_cvss_flattened.unionByName(tmp_df)
     df_cvss_combined = df_cvss_flattened.groupBy(
         "vendor", "product", "ingestionTimestamp", "ingestionDate",
-        "cveId", "lastModified", "vulnStatus", "Descriptions", "weaknesses"
+        "cveId", "lastModified", "vulnStatus", "Descriptions", "published", "weaknesses"
     ).agg(
         array_distinct(collect_list("cvssData")).alias("cvssData")
     )
@@ -374,7 +373,6 @@ else:
 add_log(f"CVSS combined record count: {df_cvss_combined.count()}")
 
 # --- Process CWE from fkie_nvd ---
-# CHANGE: cweId = the "value" from the description (lang like 'en%'), cweDescription = null
 df_cvss_combined = df_cvss_combined.withColumn("weakness", explode_outer("weaknesses")).withColumn(
     "fkie_cwe_struct",
     expr("""
@@ -390,7 +388,7 @@ df_cvss_combined = df_cvss_combined.withColumn("weakness", explode_outer("weakne
 
 df_cvss_combined = df_cvss_combined.groupBy(
     "vendor", "product", "ingestionTimestamp", "ingestionDate",
-    "cveId", "lastModified", "vulnStatus", "Descriptions"
+    "cveId", "lastModified", "vulnStatus", "Descriptions", "published"
 ).agg(
     array_distinct(flatten(collect_list("cvssData"))).alias("cvssData"),
     array_distinct(flatten(collect_list("fkie_cwe_struct"))).alias("fkie_cweData")
@@ -409,13 +407,14 @@ nvd_df = df_cvss_combined.select(
     "vendor", "product", "cveId",
     F.col("ingestionTimestamp").alias("nvd_ingestionTimestamp"),
     F.col("ingestionDate").alias("nvd_ingestionDate"),
-    "lastModified", "vulnStatus", "Descriptions", "cvssData", "fkie_cweData"
+    "lastModified", "vulnStatus", "Descriptions", "cvssData", "fkie_cweData",
+    "published"
 ).alias("nvd")
 
 combined_df = cv_df.join(nvd_df, ["vendor", "product", "cveId"], "outer") \
     .withColumn("ingestionTimestamp", F.coalesce(col("cv.cv_ingestionTimestamp"), col("nvd.nvd_ingestionTimestamp"))) \
     .withColumn("ingestionDate", F.coalesce(col("cv.cv_ingestionDate"), col("nvd.nvd_ingestionDate"))) \
-    .withColumn("datePublished", col("cv.datePublished")) \
+    .withColumn("datePublished", F.coalesce(col("cv.datePublished"), col("nvd.published"))) \
     .withColumn("dateReserved", col("cv.dateReserved")) \
     .withColumn("dateUpdated", col("cv.dateUpdated")) \
     .withColumn("datePublic", col("cv.datePublic")) \
@@ -572,7 +571,7 @@ add_log("Insert executed for all records.")
 # --- Step 8: Write logs to S3 ---
 try:
     log_content = "\n".join(log_messages)
-    log_file_key = f"{STAGING_LOG_PREFIX}staging_log_{current_date}.txt"
+    log_file_key = f"{STAGING_LOG_PREFIX}cve_staging_log_{current_date}.txt"
     boto3.client("s3").put_object(Bucket="cve-staging", Key=log_file_key, Body=log_content)
     add_log("Log file written successfully.")
 except Exception as log_ex:

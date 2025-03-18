@@ -1,4 +1,4 @@
-import sys, re, time, boto3
+import sys, re, boto3
 from datetime import datetime, timezone
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
@@ -21,7 +21,6 @@ args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = SparkSession.builder \
-    .config("spark.eventLog.enabled", "false") \
     .config("spark.sql.catalog.glue_catalog", "org.apache.iceberg.spark.SparkCatalog") \
     .config("spark.sql.catalog.glue_catalog.type", "glue") \
     .config("spark.sql.catalog.glue_catalog.warehouse", STAGING_BASE_PATH) \
