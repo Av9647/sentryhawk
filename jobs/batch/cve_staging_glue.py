@@ -28,6 +28,7 @@ args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = SparkSession.builder \
+    .config("spark.eventLog.enabled", "false") \
     .config("spark.sql.catalog.glue_catalog", "org.apache.iceberg.spark.SparkCatalog") \
     .config("spark.sql.catalog.glue_catalog.type", "glue") \
     .config("spark.sql.catalog.glue_catalog.warehouse", STAGING_BUCKET) \
