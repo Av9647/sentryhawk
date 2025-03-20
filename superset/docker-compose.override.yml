@@ -1,0 +1,6 @@
+version: "3.7"
+services:
+  superset:
+    environment:
+      - SUPERSET_SECRET_KEY=your-secret-key
+      - SQLALCHEMY_DATABASE_URI=postgresql+psycopg2://<RDS_USER>:<RDS_PASSWORD>@<RDS_ENDPOINT>:5432/<RDS_DB_NAME>
