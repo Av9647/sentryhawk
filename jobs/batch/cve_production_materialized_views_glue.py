@@ -1,0 +1,92 @@
+import sys
+from pyspark.sql import SparkSession, functions as F
+from pyspark.sql.functions import when, to_date, col, count, sum as _sum, avg
+from awsglue.utils import getResolvedOptions
+from awsglue.context import GlueContext
+from pyspark.context import SparkContext
+
+# --- Initialize Glue and Spark ---
+args = getResolvedOptions(sys.argv, ['JOB_NAME'])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+
+# Set database name
+database_name = "cve_db"
+
+# Read production table (assumed to be updated via SCD Type 2, and only current records are marked with current_flag = true)
+production_df = spark.table(f"{database_name}.cve_production_master").filter("current_flag = true")
+
+# Define the weighted score expression
+weighted_score = when(col("severity") == "Critical", col("max_cvss_score") * 1.0) \
+    .when(col("severity") == "High", col("max_cvss_score") * 0.75) \
+    .when(col("severity") == "Medium", col("max_cvss_score") * 0.50) \
+    .when(col("severity") == "Low", col("max_cvss_score") * 0.25) \
+    .otherwise(0)
+
+# ---------------------------
+# A. Cumulative Vendor Table
+# ---------------------------
+cumulative_vendor = production_df.withColumn("ingestion_date", to_date(col("datePublished"))) \
+    .groupBy("vendor", "ingestion_date") \
+    .agg(
+         count("*").alias("total_cves"),
+         _sum(weighted_score).alias("threat_index"),
+         avg(col("max_cvss_score")).alias("avg_cvss"),
+         _sum(when(col("severity") == "Critical", 1).otherwise(0)).alias("critical_count"),
+         _sum(when(col("severity") == "High", 1).otherwise(0)).alias("high_count"),
+         _sum(when(col("severity") == "Medium", 1).otherwise(0)).alias("medium_count"),
+         _sum(when(col("severity") == "Low", 1).otherwise(0)).alias("low_count")
+    )
+
+# Write the vendor cumulative table as an Iceberg table
+cumulative_vendor.write.format("iceberg") \
+    .mode("overwrite") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_cumulative_vendor/") \
+    .saveAsTable(f"{database_name}.cve_cumulative_vendor")
+
+# ---------------------------
+# B. Cumulative Product Table
+# ---------------------------
+cumulative_product = production_df.withColumn("ingestion_date", to_date(col("datePublished"))) \
+    .groupBy("vendor", "product", "ingestion_date") \
+    .agg(
+         count("*").alias("total_cves"),
+         _sum(weighted_score).alias("threat_index"),
+         avg(col("max_cvss_score")).alias("avg_cvss"),
+         _sum(when(col("severity") == "Critical", 1).otherwise(0)).alias("critical_count"),
+         _sum(when(col("severity") == "High", 1).otherwise(0)).alias("high_count"),
+         _sum(when(col("severity") == "Medium", 1).otherwise(0)).alias("medium_count"),
+         _sum(when(col("severity") == "Low", 1).otherwise(0)).alias("low_count")
+    )
+
+# Write the product cumulative table as an Iceberg table
+cumulative_product.write.format("iceberg") \
+    .mode("overwrite") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_cumulative_product/") \
+    .saveAsTable(f"{database_name}.cve_cumulative_product")
+
+# ---------------------------
+# C. Global Summary Table
+# ---------------------------
+global_summary = production_df.withColumn("ingestion_date", to_date(col("datePublished"))) \
+    .groupBy("ingestion_date") \
+    .agg(
+         count("*").alias("total_cves"),
+         _sum(weighted_score).alias("threat_index"),
+         avg(col("max_cvss_score")).alias("avg_cvss"),
+         _sum(when(col("severity") == "Critical", 1).otherwise(0)).alias("critical_count"),
+         _sum(when(col("severity") == "High", 1).otherwise(0)).alias("high_count"),
+         _sum(when(col("severity") == "Medium", 1).otherwise(0)).alias("medium_count"),
+         _sum(when(col("severity") == "Low", 1).otherwise(0)).alias("low_count")
+    )
+
+# Write the global summary table as an Iceberg table
+global_summary.write.format("iceberg") \
+    .mode("overwrite") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_global_summary/") \
+    .saveAsTable(f"{database_name}.cve_global_summary")
+
+# --- Job Commit ---
+job = glueContext.create_job(args['JOB_NAME'])
+job.commit()
