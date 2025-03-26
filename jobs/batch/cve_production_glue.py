@@ -70,7 +70,7 @@ new_df = new_df.withColumn(
     F.expr("""
       CASE 
         WHEN cvssData IS NULL OR size(cvssData) = 0 THEN 
-          named_struct('source','', 'type','', 'version','', 'vectorString','', 'baseScore',0D, 'impactScore',0D, 'exploitabilityScore',0D)
+          named_struct('source','', 'type','', 'version','', 'vectorString','', 'baseScore', CAST(NULL AS DOUBLE), 'impactScore', CAST(NULL AS DOUBLE), 'exploitabilityScore', CAST(NULL AS DOUBLE))
         ELSE aggregate(
           filter(coalesce(cvssData, array()), x -> x IS NOT NULL AND x.baseScore IS NOT NULL),
           cast(null as struct<source:string, type:string, version:string, vectorString:string, baseScore:double, impactScore:double, exploitabilityScore:double>),
