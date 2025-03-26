@@ -19,14 +19,14 @@ spark = SparkSession.builder \
 # Set database name
 database_name = "cve_db"
 
-# Read production table (assumed to be updated via SCD Type 2, and only current records are marked with current_flag = true)
-production_df = spark.table(f"{database_name}.cve_production_master").filter("current_flag = true")
+# Read production table (assumed to be updated via SCD Type 2, and only current records are marked with currentFlag = true)
+production_df = spark.table(f"{database_name}.cve_production_master").filter("currentFlag = true")
 
 # Define the weighted score expression
-weighted_score = when(col("severity") == "Critical", col("max_cvss_score") * 1.0) \
-    .when(col("severity") == "High", col("max_cvss_score") * 0.75) \
-    .when(col("severity") == "Medium", col("max_cvss_score") * 0.50) \
-    .when(col("severity") == "Low", col("max_cvss_score") * 0.25) \
+weighted_score = when(col("severity") == "Critical", col("cvssScore") * 1.0) \
+    .when(col("severity") == "High", col("cvssScore") * 0.75) \
+    .when(col("severity") == "Medium", col("cvssScore") * 0.50) \
+    .when(col("severity") == "Low", col("cvssScore") * 0.25) \
     .otherwise(0)
 
 # ---------------------------
@@ -39,7 +39,7 @@ cumulative_vendor = (
     .agg(
         count("*").alias("total_cves"),
         F.round(_sum(weighted_score), 2).alias("threat_index"),
-        F.round(avg(col("max_cvss_score")), 2).alias("avg_cvss"),
+        F.round(avg(col("cvssScore")), 2).alias("avg_cvss"),
         _sum(when(col("severity") == "Critical", 1).otherwise(0)).alias("critical_count"),
         _sum(when(col("severity") == "High", 1).otherwise(0)).alias("high_count"),
         _sum(when(col("severity") == "Medium", 1).otherwise(0)).alias("medium_count"),
@@ -74,7 +74,7 @@ cumulative_product = (
     .agg(
         count("*").alias("total_cves"),
         F.round(_sum(weighted_score), 2).alias("threat_index"),
-        F.round(avg(col("max_cvss_score")), 2).alias("avg_cvss"),
+        F.round(avg(col("cvssScore")), 2).alias("avg_cvss"),
         _sum(when(col("severity") == "Critical", 1).otherwise(0)).alias("critical_count"),
         _sum(when(col("severity") == "High", 1).otherwise(0)).alias("high_count"),
         _sum(when(col("severity") == "Medium", 1).otherwise(0)).alias("medium_count"),
@@ -107,7 +107,7 @@ global_summary = (
     .agg(
         count("*").alias("total_cves"),
         F.round(_sum(weighted_score), 2).alias("threat_index"),
-        F.round(avg(col("max_cvss_score")), 2).alias("avg_cvss"),
+        F.round(avg(col("cvssScore")), 2).alias("avg_cvss"),
         _sum(when(col("severity") == "Critical", 1).otherwise(0)).alias("critical_count"),
         _sum(when(col("severity") == "High", 1).otherwise(0)).alias("high_count"),
         _sum(when(col("severity") == "Medium", 1).otherwise(0)).alias("medium_count"),

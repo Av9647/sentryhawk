@@ -63,7 +63,46 @@ new_df = spark.table(f"glue_catalog.{DATABASE}.{latest_table}")
 new_count = new_df.count()
 log(f"New staging records loaded: {new_count}")
 
-# Step 3: Create production table if not exists (Iceberg, SCD2 schema)
+# Step 3: Dynamic Approach for ANY CVSS version (CVSS score & severity)
+# We'll pick the single CVSS entry with the highest baseScore, ignoring version strings.
+new_df = new_df.withColumn(
+    "chosenCvss",
+    F.expr("""
+      CASE 
+        WHEN cvssData IS NULL OR size(cvssData) = 0 THEN 
+          named_struct('source','', 'type','', 'version','', 'vectorString','', 'baseScore',0D, 'impactScore',0D, 'exploitabilityScore',0D)
+        ELSE aggregate(
+          filter(coalesce(cvssData, array()), x -> x IS NOT NULL AND x.baseScore IS NOT NULL),
+          cast(null as struct<source:string, type:string, version:string, vectorString:string, baseScore:double, impactScore:double, exploitabilityScore:double>),
+          (acc, x) -> CASE WHEN acc IS NULL OR x.baseScore > acc.baseScore THEN x ELSE acc END,
+          acc -> acc
+        )
+      END
+    """)
+).withColumn(
+    "cvssScore",
+    F.col("chosenCvss.baseScore")
+).withColumn(
+    "cvssVersion",
+    F.col("chosenCvss.version")
+).withColumn(
+    "severity",
+    F.when(F.col("cvssScore") >= 9.0, "Critical")
+     .when(F.col("cvssScore") >= 7.0, "High")
+     .when(F.col("cvssScore") >= 4.0, "Medium")
+     .when(F.col("cvssScore").isNotNull(), "Low")
+     .otherwise(F.lit(None))
+)
+
+# Add SCD2 metadata columns for new records
+current_ts = datetime.now(timezone.utc)
+new_df = new_df.withColumn("validFrom", F.lit(current_ts)) \
+               .withColumn("validTo", F.lit(None).cast("timestamp")) \
+               .withColumn("currentFlag", F.lit(True))
+
+new_df.createOrReplaceTempView("new_data")
+
+# Step 4: Create production table if not exists (Iceberg, SCD2 schema)
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS glue_catalog.{DATABASE}.{PROD_TABLE} (
     vendor              string,
@@ -82,12 +121,12 @@ CREATE TABLE IF NOT EXISTS glue_catalog.{DATABASE}.{PROD_TABLE} (
     lastModified        timestamp,
     descriptions        string,
     -- SCD Type 2 fields:
-    valid_from          timestamp,
-    valid_to            timestamp,
-    current_flag        boolean,
+    validFrom           timestamp,
+    validTo             timestamp,
+    currentFlag         boolean,
     -- Derived classification fields:
-    max_cvss_score      double,
-    max_cvss_version    string,
+    cvssScore           double,
+    cvssVersion         string,
     severity            string
 ) 
 USING ICEBERG 
@@ -95,41 +134,6 @@ PARTITIONED BY (years(datePublished))
 LOCATION '{PROD_PATH}{PROD_TABLE}'
 """)
 log(f"Production table {PROD_TABLE} is ready (created if not exists).")
-
-# Step 4: Derive classification on new data (max CVSS score & severity)
-# Prefer CVSS v3 over v2; if multiple of same version, take highest score.
-# We compute the max score and corresponding version for each record:
-new_df = new_df.withColumn(
-    "max_cvss_score",
-    # compute max baseScore among v3 entries if any; otherwise among v2
-    F.when(
-        F.expr("exists(cvssData, x -> x.version LIKE '3%')"),
-        F.expr("aggregate(filter(cvssData, x -> x.version LIKE '3%'), 0D, (acc,x) -> greatest(acc, x.baseScore))")
-    ).otherwise(
-        F.expr("aggregate(filter(cvssData, x -> x.version LIKE '2%'), 0D, (acc,x) -> greatest(acc, x.baseScore))")
-    )
-).withColumn(
-    "max_cvss_version",
-    F.when(
-        F.expr("exists(cvssData, x -> x.version LIKE '3%')"),
-        F.lit("3.x")
-    ).otherwise(F.lit("2.0"))
-).withColumn(
-    "severity",
-    F.when(F.col("max_cvss_score") >= 9.0, "Critical")
-     .when(F.col("max_cvss_score") >= 7.0, "High")
-     .when(F.col("max_cvss_score") >= 4.0, "Medium")
-     .when(F.col("max_cvss_score").isNotNull(), "Low")
-     .otherwise(F.lit(None))
-)
-
-# Add SCD2 metadata columns for new records
-current_ts = datetime.now(timezone.utc)
-new_df = new_df.withColumn("valid_from", F.lit(current_ts)) \
-               .withColumn("valid_to", F.lit(None).cast("timestamp")) \
-               .withColumn("current_flag", F.lit(True))
-
-new_df.createOrReplaceTempView("new_data")
 
 # Step 5: Merge incremental changes into production table (SCD Type 2 logic)
 # 5a. Expire any existing current records that are updated by new data
@@ -139,11 +143,11 @@ USING new_data AS source
 ON target.cveId = source.cveId 
    AND target.vendor = source.vendor 
    AND target.product = source.product 
-   AND target.current_flag = true
+   AND target.currentFlag = true
 WHEN MATCHED AND target.lastModified < source.lastModified
 THEN UPDATE SET 
-    target.valid_to = source.valid_from, 
-    target.current_flag = false
+    target.validTo = source.validFrom, 
+    target.currentFlag = false
 """)
 log("Existing records updated (expired) where CVE data changed.")
 
@@ -154,13 +158,11 @@ USING new_data AS source
 ON target.cveId = source.cveId 
    AND target.vendor = source.vendor 
    AND target.product = source.product 
-   AND target.current_flag = true
+   AND target.currentFlag = true
 WHEN NOT MATCHED 
 THEN INSERT *
 """)
 log("New records inserted (including new CVEs and new versions of updated CVEs).")
-
-# (Alternatively, the above could be done with separate INSERT for new_df after updating old records)
 
 # Step 6: Logging the execution details to S3
 try:
