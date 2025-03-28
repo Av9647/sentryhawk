@@ -137,7 +137,8 @@ cumulative_vendor = (
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
     .withColumn(
         "risk_rating",
-        when(col("threat_index") >= 76, "Severe")
+        when(col("threat_index").isNull(), "Unknown")
+        .when(col("threat_index") >= 76, "Severe")
         .when(col("threat_index") >= 51, "High")
         .when(col("threat_index") >= 26, "Moderate")
         .when(col("threat_index") > 0, "Low")
@@ -172,7 +173,8 @@ cumulative_product = (
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
     .withColumn(
         "risk_rating",
-        when(col("threat_index") >= 31, "Severe")
+        when(col("threat_index").isNull(), "Unknown")
+        .when(col("threat_index") >= 31, "Severe")
         .when(col("threat_index") >= 21, "High")
         .when(col("threat_index") >= 11, "Moderate")
         .when(col("threat_index") > 0, "Low")
@@ -207,7 +209,8 @@ global_summary = (
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
     .withColumn(
         "risk_rating",
-        when(col("threat_index") >= 151, "Severe")
+        when(col("threat_index").isNull(), "Unknown")
+        .when(col("threat_index") >= 151, "Severe")
         .when(col("threat_index") >= 101, "High")
         .when(col("threat_index") >= 51, "Moderate")
         .when(col("threat_index") > 0, "Low")
