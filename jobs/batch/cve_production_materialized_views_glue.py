@@ -1,8 +1,10 @@
 import sys
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.functions import (
-    when, to_date, year, col, countDistinct, sumDistinct, avg, regexp_extract, expr, lit, round as round_col
+    when, to_date, year, month, col, countDistinct, sumDistinct, avg,
+    regexp_extract, expr, lit, round as round_col, row_number
 )
+from pyspark.sql.window import Window
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from pyspark.context import SparkContext
@@ -84,15 +86,19 @@ production_df = production_df.withColumn("is_network_based", when(col("AV") == "
     .withColumn("is_high_conf", when(col("C") == "H", True).otherwise(False)) \
     .withColumn("is_high_int", when(col("I") == "H", True).otherwise(False)) \
     .withColumn("is_high_avail", when(col("A") == "H", True).otherwise(False))
-    
-production_df = production_df.withColumn("is_fully_critical",
+
+production_df = production_df.withColumn(
+    "is_fully_critical",
     when(
         (col("is_network_based") == True) &
         (col("is_no_ui") == True) &
         (col("is_low_priv") == True) &
         (((col("cvssVersion") != "2.0") & (col("is_scope_changed") == True)) |
          (col("cvssVersion") == "2.0")),
-        when((col("is_high_conf") == True) | (col("is_high_int") == True) | (col("is_high_avail") == True), True)
+        when(
+            (col("is_high_conf") == True) | (col("is_high_int") == True) | (col("is_high_avail") == True),
+            True
+        )
     ).otherwise(False)
 )
 
@@ -106,90 +112,51 @@ weighted_score = when(col("severity") == "Critical", col("cvssScore") * 1.0) \
     .otherwise(0)
 
 # -----------------------------------------------------
-# Step 5: Add Year Column for Partitioning
+# Step 5: Add Date Columns for Partitioning
 # -----------------------------------------------------
 production_df = production_df.withColumn("datePublished", to_date(col("datePublished")))
 production_df = production_df.withColumn("year_published", year(col("datePublished")))
+production_df = production_df.withColumn("month_published", month(col("datePublished")))
 
 # -----------------------------------------------------
-# Step 6: Build Specialized Cumulative (Materialized) Tables with Distinct CVE Counts
+# Step 6: Define Risk Rating Functions for Different Aggregations
+# -----------------------------------------------------
+def daily_risk_rating(threat_index_col):
+    return (
+        when(threat_index_col.isNull(), "Unknown")
+        .when(threat_index_col >= 151, "Severe")
+        .when(threat_index_col >= 101, "High")
+        .when(threat_index_col >= 51,  "Moderate")
+        .when(threat_index_col > 0,    "Low")
+        .otherwise("None")
+    )
+
+def monthly_risk_rating(threat_index_col):
+    return (
+        when(threat_index_col.isNull(), "Unknown")
+        .when(threat_index_col >= 300, "Severe")
+        .when(threat_index_col >= 200, "High")
+        .when(threat_index_col >= 100, "Moderate")
+        .when(threat_index_col > 0,    "Low")
+        .otherwise("None")
+    )
+
+def ytd_risk_rating(threat_index_col):
+    return (
+        when(threat_index_col.isNull(), "Unknown")
+        .when(threat_index_col >= 500, "Severe")
+        .when(threat_index_col >= 300, "High")
+        .when(threat_index_col >= 150, "Moderate")
+        .when(threat_index_col > 0,    "Low")
+        .otherwise("None")
+    )
+
+# -----------------------------------------------------
+# Step 7: Daily Aggregations
 # -----------------------------------------------------
 
-# A. Cumulative Vendor Table
-cumulative_vendor = (
-    production_df
-    # Keep daily grouping, but also group by year_published for completeness
-    .groupBy("vendor", "datePublished", "year_published")
-    .agg(
-        countDistinct("cveId").alias("total_cves"),
-        round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
-        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
-        countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
-        countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
-        countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
-        countDistinct(when(col("severity") == "Low", col("cveId"))).alias("low_count"),
-        round_col(sumDistinct(when(col("is_network_based"), weighted_score)), 2).alias("network_threat_index"),
-        countDistinct(when(col("is_network_based"), col("cveId"))).alias("network_cves"),
-        countDistinct(when(col("is_no_ui"), col("cveId"))).alias("no_ui_cves"),
-        countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
-        countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
-    )
-    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
-    .withColumn(
-        "risk_rating",
-        when(col("threat_index").isNull(), "Unknown")
-        .when(col("threat_index") >= 76, "Severe")
-        .when(col("threat_index") >= 51, "High")
-        .when(col("threat_index") >= 26, "Moderate")
-        .when(col("threat_index") > 0, "Low")
-        .otherwise("None")
-    )
-)
-
-cumulative_vendor.write.format("iceberg") \
-    .mode("overwrite") \
-    .partitionBy("year_published") \
-    .option("path", "s3://cve-production/cve_production_tables/cve_production_cumulative_vendor/") \
-    .saveAsTable(f"{database_name}.cve_production_cumulative_vendor")
-
-# B. Cumulative Product Table
-cumulative_product = (
-    production_df
-    .groupBy("vendor", "product", "datePublished", "year_published")
-    .agg(
-        countDistinct("cveId").alias("total_cves"),
-        round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
-        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
-        countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
-        countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
-        countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
-        countDistinct(when(col("severity") == "Low", col("cveId"))).alias("low_count"),
-        round_col(sumDistinct(when(col("is_network_based"), weighted_score)), 2).alias("network_threat_index"),
-        countDistinct(when(col("is_network_based"), col("cveId"))).alias("network_cves"),
-        countDistinct(when(col("is_no_ui"), col("cveId"))).alias("no_ui_cves"),
-        countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
-        countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
-    )
-    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
-    .withColumn(
-        "risk_rating",
-        when(col("threat_index").isNull(), "Unknown")
-        .when(col("threat_index") >= 31, "Severe")
-        .when(col("threat_index") >= 21, "High")
-        .when(col("threat_index") >= 11, "Moderate")
-        .when(col("threat_index") > 0, "Low")
-        .otherwise("None")
-    )
-)
-
-cumulative_product.write.format("iceberg") \
-    .mode("overwrite") \
-    .partitionBy("year_published") \
-    .option("path", "s3://cve-production/cve_production_tables/cve_production_cumulative_product/") \
-    .saveAsTable(f"{database_name}.cve_production_cumulative_product")
-
-# C. Global Summary Table
-global_summary = (
+# A. Daily Global
+daily_global = (
     production_df
     .groupBy("datePublished", "year_published")
     .agg(
@@ -207,21 +174,325 @@ global_summary = (
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
-    .withColumn(
-        "risk_rating",
-        when(col("threat_index").isNull(), "Unknown")
-        .when(col("threat_index") >= 151, "Severe")
-        .when(col("threat_index") >= 101, "High")
-        .when(col("threat_index") >= 51, "Moderate")
-        .when(col("threat_index") > 0, "Low")
-        .otherwise("None")
-    )
+    .withColumn("risk_rating", daily_risk_rating(col("threat_index")))
 )
 
-global_summary.write.format("iceberg") \
+daily_global.write.format("iceberg") \
     .mode("overwrite") \
     .partitionBy("year_published") \
-    .option("path", "s3://cve-production/cve_production_tables/cve_production_global_summary/") \
-    .saveAsTable(f"{database_name}.cve_production_global_summary")
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_global/") \
+    .saveAsTable(f"{database_name}.cve_production_daily_global")
 
-print("Specialized cumulative tables for in-depth CVE analysis (distinct CVEs, partitioned by year) created successfully.")
+# B. Daily Vendor
+daily_vendor = (
+    production_df
+    .groupBy("vendor", "datePublished", "year_published")
+    .agg(
+        countDistinct("cveId").alias("total_cves"),
+        round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
+        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
+        countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
+        countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
+        countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
+        countDistinct(when(col("severity") == "Low", col("cveId"))).alias("low_count"),
+        round_col(sumDistinct(when(col("is_network_based"), weighted_score)), 2).alias("network_threat_index"),
+        countDistinct(when(col("is_network_based"), col("cveId"))).alias("network_cves"),
+        countDistinct(when(col("is_no_ui"), col("cveId"))).alias("no_ui_cves"),
+        countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
+        countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
+    )
+    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
+    .withColumn("risk_rating", daily_risk_rating(col("threat_index")))
+)
+
+daily_vendor.write.format("iceberg") \
+    .mode("overwrite") \
+    .partitionBy("year_published") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_vendor/") \
+    .saveAsTable(f"{database_name}.cve_production_daily_vendor")
+
+# C. Daily Product
+daily_product = (
+    production_df
+    .groupBy("vendor", "product", "datePublished", "year_published")
+    .agg(
+        countDistinct("cveId").alias("total_cves"),
+        round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
+        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
+        countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
+        countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
+        countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
+        countDistinct(when(col("severity") == "Low", col("cveId"))).alias("low_count"),
+        round_col(sumDistinct(when(col("is_network_based"), weighted_score)), 2).alias("network_threat_index"),
+        countDistinct(when(col("is_network_based"), col("cveId"))).alias("network_cves"),
+        countDistinct(when(col("is_no_ui"), col("cveId"))).alias("no_ui_cves"),
+        countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
+        countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
+    )
+    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
+    .withColumn("risk_rating", daily_risk_rating(col("threat_index")))
+)
+
+daily_product.write.format("iceberg") \
+    .mode("overwrite") \
+    .partitionBy("year_published") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_product/") \
+    .saveAsTable(f"{database_name}.cve_production_daily_product")
+
+# -----------------------------------------------------
+# Step 7a: Deduplication of Daily Tables
+# -----------------------------------------------------
+# Ensure one row per date (or vendor-date, vendor-product-date)
+
+# Global: one row per datePublished
+w_global_dedupe = Window.partitionBy("datePublished").orderBy(F.desc("year_published"))
+daily_global_single = (
+    daily_global.withColumn("row_num", row_number().over(w_global_dedupe))
+    .filter("row_num = 1")
+    .drop("row_num")
+)
+
+# Vendor: one row per vendor, datePublished
+w_vendor_dedupe = Window.partitionBy("vendor", "datePublished").orderBy(F.desc("year_published"))
+daily_vendor_single = (
+    daily_vendor.withColumn("row_num", row_number().over(w_vendor_dedupe))
+    .filter("row_num = 1")
+    .drop("row_num")
+)
+
+# Product: one row per vendor, product, datePublished
+w_product_dedupe = Window.partitionBy("vendor", "product", "datePublished").orderBy(F.desc("year_published"))
+daily_product_single = (
+    daily_product.withColumn("row_num", row_number().over(w_product_dedupe))
+    .filter("row_num = 1")
+    .drop("row_num")
+)
+
+# -----------------------------------------------------
+# Step 8: Monthly & YTD Aggregations
+# -----------------------------------------------------
+
+# A. Monthly Global
+monthly_global = (
+    production_df
+    .groupBy("year_published", "month_published")
+    .agg(
+        countDistinct("cveId").alias("total_cves"),
+        round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
+        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
+        countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
+        countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
+        countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
+        countDistinct(when(col("severity") == "Low", col("cveId"))).alias("low_count"),
+        round_col(sumDistinct(when(col("is_network_based"), weighted_score)), 2).alias("network_threat_index"),
+        countDistinct(when(col("is_network_based"), col("cveId"))).alias("network_cves"),
+        countDistinct(when(col("is_no_ui"), col("cveId"))).alias("no_ui_cves"),
+        countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
+        countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
+    )
+    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
+    .withColumn("risk_rating", monthly_risk_rating(col("threat_index")))
+)
+
+monthly_global.write.format("iceberg") \
+    .mode("overwrite") \
+    .partitionBy("year_published", "month_published") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_monthly_global/") \
+    .saveAsTable(f"{database_name}.cve_production_monthly_global")
+
+# B. Monthly Vendor
+monthly_vendor = (
+    production_df
+    .groupBy("vendor", "year_published", "month_published")
+    .agg(
+        countDistinct("cveId").alias("total_cves"),
+        round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
+        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
+        countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
+        countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
+        countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
+        countDistinct(when(col("severity") == "Low", col("cveId"))).alias("low_count"),
+        round_col(sumDistinct(when(col("is_network_based"), weighted_score)), 2).alias("network_threat_index"),
+        countDistinct(when(col("is_network_based"), col("cveId"))).alias("network_cves"),
+        countDistinct(when(col("is_no_ui"), col("cveId"))).alias("no_ui_cves"),
+        countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
+        countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
+    )
+    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
+    .withColumn("risk_rating", monthly_risk_rating(col("threat_index")))
+)
+
+monthly_vendor.write.format("iceberg") \
+    .mode("overwrite") \
+    .partitionBy("year_published", "month_published") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_monthly_vendor/") \
+    .saveAsTable(f"{database_name}.cve_production_monthly_vendor")
+
+# C. Monthly Product
+monthly_product = (
+    production_df
+    .groupBy("vendor", "product", "year_published", "month_published")
+    .agg(
+        countDistinct("cveId").alias("total_cves"),
+        round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
+        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
+        countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
+        countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
+        countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
+        countDistinct(when(col("severity") == "Low", col("cveId"))).alias("low_count"),
+        round_col(sumDistinct(when(col("is_network_based"), weighted_score)), 2).alias("network_threat_index"),
+        countDistinct(when(col("is_network_based"), col("cveId"))).alias("network_cves"),
+        countDistinct(when(col("is_no_ui"), col("cveId"))).alias("no_ui_cves"),
+        countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
+        countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
+    )
+    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
+    .withColumn("risk_rating", monthly_risk_rating(col("threat_index")))
+)
+
+monthly_product.write.format("iceberg") \
+    .mode("overwrite") \
+    .partitionBy("year_published", "month_published") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_monthly_product/") \
+    .saveAsTable(f"{database_name}.cve_production_monthly_product")
+
+# D. YTD Global
+ytd_global = (
+    production_df
+    .groupBy("year_published")
+    .agg(
+        countDistinct("cveId").alias("total_cves"),
+        round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
+        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
+        countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
+        countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
+        countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
+        countDistinct(when(col("severity") == "Low", col("cveId"))).alias("low_count"),
+        round_col(sumDistinct(when(col("is_network_based"), weighted_score)), 2).alias("network_threat_index"),
+        countDistinct(when(col("is_network_based"), col("cveId"))).alias("network_cves"),
+        countDistinct(when(col("is_no_ui"), col("cveId"))).alias("no_ui_cves"),
+        countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
+        countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
+    )
+    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
+    .withColumn("risk_rating", ytd_risk_rating(col("threat_index")))
+)
+
+ytd_global.write.format("iceberg") \
+    .mode("overwrite") \
+    .partitionBy("year_published") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_ytd_global/") \
+    .saveAsTable(f"{database_name}.cve_production_ytd_global")
+
+# E. YTD Vendor
+ytd_vendor = (
+    production_df
+    .groupBy("vendor", "year_published")
+    .agg(
+        countDistinct("cveId").alias("total_cves"),
+        round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
+        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
+        countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
+        countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
+        countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
+        countDistinct(when(col("severity") == "Low", col("cveId"))).alias("low_count"),
+        round_col(sumDistinct(when(col("is_network_based"), weighted_score)), 2).alias("network_threat_index"),
+        countDistinct(when(col("is_network_based"), col("cveId"))).alias("network_cves"),
+        countDistinct(when(col("is_no_ui"), col("cveId"))).alias("no_ui_cves"),
+        countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
+        countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
+    )
+    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
+    .withColumn("risk_rating", ytd_risk_rating(col("threat_index")))
+)
+
+ytd_vendor.write.format("iceberg") \
+    .mode("overwrite") \
+    .partitionBy("year_published") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_ytd_vendor/") \
+    .saveAsTable(f"{database_name}.cve_production_ytd_vendor")
+
+# F. YTD Product
+ytd_product = (
+    production_df
+    .groupBy("vendor", "product", "year_published")
+    .agg(
+        countDistinct("cveId").alias("total_cves"),
+        round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
+        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
+        countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
+        countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
+        countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
+        countDistinct(when(col("severity") == "Low", col("cveId"))).alias("low_count"),
+        round_col(sumDistinct(when(col("is_network_based"), weighted_score)), 2).alias("network_threat_index"),
+        countDistinct(when(col("is_network_based"), col("cveId"))).alias("network_cves"),
+        countDistinct(when(col("is_no_ui"), col("cveId"))).alias("no_ui_cves"),
+        countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
+        countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
+    )
+    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
+    .withColumn("risk_rating", ytd_risk_rating(col("threat_index")))
+)
+
+ytd_product.write.format("iceberg") \
+    .mode("overwrite") \
+    .partitionBy("year_published") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_ytd_product/") \
+    .saveAsTable(f"{database_name}.cve_production_ytd_product")
+
+# -----------------------------------------------------
+# Step 9: Running Total (Cumulative) Views on Deduplicated Daily Aggregates
+# -----------------------------------------------------
+
+# A. Global Running Total (reset each year)
+window_global = Window.partitionBy("year_published") \
+    .orderBy("datePublished") \
+    .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+
+daily_global_running = (
+    daily_global_single
+    .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(window_global), 2))
+    .withColumn("running_risk_rating", ytd_risk_rating(col("cumulative_threat_index")))
+)
+
+daily_global_running.write.format("iceberg") \
+    .mode("overwrite") \
+    .partitionBy("year_published") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_global_running/") \
+    .saveAsTable(f"{database_name}.cve_production_daily_global_running")
+
+# B. Vendor Running Total (per vendor, reset each year)
+window_vendor = Window.partitionBy("vendor", "year_published") \
+    .orderBy("datePublished") \
+    .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+
+daily_vendor_running = (
+    daily_vendor_single
+    .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(window_vendor), 2))
+    .withColumn("running_risk_rating", ytd_risk_rating(col("cumulative_threat_index")))
+)
+
+daily_vendor_running.write.format("iceberg") \
+    .mode("overwrite") \
+    .partitionBy("vendor", "year_published") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_vendor_running/") \
+    .saveAsTable(f"{database_name}.cve_production_daily_vendor_running")
+
+# C. Product Running Total (per vendor & product, reset each year)
+window_product = Window.partitionBy("vendor", "product", "year_published") \
+    .orderBy("datePublished") \
+    .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+
+daily_product_running = (
+    daily_product_single
+    .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(window_product), 2))
+    .withColumn("running_risk_rating", ytd_risk_rating(col("cumulative_threat_index")))
+)
+
+daily_product_running.write.format("iceberg") \
+    .mode("overwrite") \
+    .partitionBy("vendor", "product", "year_published") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_product_running/") \
+    .saveAsTable(f"{database_name}.cve_production_daily_product_running")
+
+print("All aggregated views (daily, monthly, YTD, and running total with deduplication) created successfully.")
