@@ -119,36 +119,96 @@ production_df = production_df.withColumn("year_published", year(col("datePublish
 production_df = production_df.withColumn("month_published", month(col("datePublished")))
 
 # -----------------------------------------------------
-# Step 6: Define Risk Rating Functions for Different Aggregations
+# Step 6: Column Expression Builders (Not UDFs)
 # -----------------------------------------------------
-def daily_risk_rating(threat_index_col):
+def daily_global_risk_expr(ti):
     return (
-        when(threat_index_col.isNull(), "Unknown")
-        .when(threat_index_col >= 151, "Severe")
-        .when(threat_index_col >= 101, "High")
-        .when(threat_index_col >= 51,  "Moderate")
-        .when(threat_index_col > 0,    "Low")
-        .otherwise("None")
+        when(ti.isNull(), "Unknown")
+        .when(ti > 40, "Severe")
+        .when(ti > 20, "High")
+        .when(ti > 10, "Moderate")
+        .when(ti > 0,  "Low")
+        .otherwise("No Risk")
     )
 
-def monthly_risk_rating(threat_index_col):
+def daily_vendor_risk_expr(ti):
     return (
-        when(threat_index_col.isNull(), "Unknown")
-        .when(threat_index_col >= 300, "Severe")
-        .when(threat_index_col >= 200, "High")
-        .when(threat_index_col >= 100, "Moderate")
-        .when(threat_index_col > 0,    "Low")
-        .otherwise("None")
+        when(ti.isNull(), "Unknown")
+        .when(ti > 30, "Severe")
+        .when(ti > 14, "High")
+        .when(ti > 7,  "Moderate")
+        .when(ti > 0,  "Low")
+        .otherwise("No Risk")
     )
 
-def ytd_risk_rating(threat_index_col):
+def daily_product_risk_expr(ti):
     return (
-        when(threat_index_col.isNull(), "Unknown")
-        .when(threat_index_col >= 500, "Severe")
-        .when(threat_index_col >= 300, "High")
-        .when(threat_index_col >= 150, "Moderate")
-        .when(threat_index_col > 0,    "Low")
-        .otherwise("None")
+        when(ti.isNull(), "Unknown")
+        .when(ti > 25, "Severe")
+        .when(ti > 12, "High")
+        .when(ti > 6,  "Moderate")
+        .when(ti > 0,  "Low")
+        .otherwise("No Risk")
+    )
+
+def monthly_global_risk_expr(ti):
+    return (
+        when(ti.isNull(), "Unknown")
+        .when(ti > 120, "Severe")
+        .when(ti > 80,  "High")
+        .when(ti > 50,  "Moderate")
+        .when(ti > 0,   "Low")
+        .otherwise("No Risk")
+    )
+
+def monthly_vendor_risk_expr(ti):
+    return (
+        when(ti.isNull(), "Unknown")
+        .when(ti > 80,  "Severe")
+        .when(ti > 43,  "High")
+        .when(ti > 20,  "Moderate")
+        .when(ti > 0,   "Low")
+        .otherwise("No Risk")
+    )
+
+def monthly_product_risk_expr(ti):
+    return (
+        when(ti.isNull(), "Unknown")
+        .when(ti > 25, "Severe")
+        .when(ti > 14, "High")
+        .when(ti > 7,  "Moderate")
+        .when(ti > 0,  "Low")
+        .otherwise("No Risk")
+    )
+
+def ytd_global_risk_expr(ti):
+    return (
+        when(ti.isNull(), "Unknown")
+        .when(ti > 180, "Severe")
+        .when(ti > 135, "High")
+        .when(ti > 90,  "Moderate")
+        .when(ti > 0,   "Low")
+        .otherwise("No Risk")
+    )
+
+def ytd_vendor_risk_expr(ti):
+    return (
+        when(ti.isNull(), "Unknown")
+        .when(ti > 105, "Severe")
+        .when(ti > 60,  "High")
+        .when(ti > 15,  "Moderate")
+        .when(ti > 0,   "Low")
+        .otherwise("No Risk")
+    )
+
+def ytd_product_risk_expr(ti):
+    return (
+        when(ti.isNull(), "Unknown")
+        .when(ti > 40, "Severe")
+        .when(ti > 15, "High")
+        .when(ti > 7,  "Moderate")
+        .when(ti > 0,  "Low")
+        .otherwise("No Risk")
     )
 
 # -----------------------------------------------------
@@ -174,7 +234,7 @@ daily_global = (
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
-    .withColumn("risk_rating", daily_risk_rating(col("threat_index")))
+    .withColumn("risk_rating", daily_global_risk_expr(col("threat_index")))
 )
 
 daily_global.write.format("iceberg") \
@@ -202,7 +262,7 @@ daily_vendor = (
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
-    .withColumn("risk_rating", daily_risk_rating(col("threat_index")))
+    .withColumn("risk_rating", daily_vendor_risk_expr(col("threat_index")))
 )
 
 daily_vendor.write.format("iceberg") \
@@ -230,7 +290,7 @@ daily_product = (
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
-    .withColumn("risk_rating", daily_risk_rating(col("threat_index")))
+    .withColumn("risk_rating", daily_product_risk_expr(col("threat_index")))
 )
 
 daily_product.write.format("iceberg") \
@@ -240,11 +300,9 @@ daily_product.write.format("iceberg") \
     .saveAsTable(f"{database_name}.cve_production_daily_product")
 
 # -----------------------------------------------------
-# Step 7a: Deduplication of Daily Tables
+# Step 7a: Deduplication
 # -----------------------------------------------------
-# Ensure one row per date (or vendor-date, vendor-product-date)
 
-# Global: one row per datePublished
 w_global_dedupe = Window.partitionBy("datePublished").orderBy(F.desc("year_published"))
 daily_global_single = (
     daily_global.withColumn("row_num", row_number().over(w_global_dedupe))
@@ -252,7 +310,6 @@ daily_global_single = (
     .drop("row_num")
 )
 
-# Vendor: one row per vendor, datePublished
 w_vendor_dedupe = Window.partitionBy("vendor", "datePublished").orderBy(F.desc("year_published"))
 daily_vendor_single = (
     daily_vendor.withColumn("row_num", row_number().over(w_vendor_dedupe))
@@ -260,7 +317,6 @@ daily_vendor_single = (
     .drop("row_num")
 )
 
-# Product: one row per vendor, product, datePublished
 w_product_dedupe = Window.partitionBy("vendor", "product", "datePublished").orderBy(F.desc("year_published"))
 daily_product_single = (
     daily_product.withColumn("row_num", row_number().over(w_product_dedupe))
@@ -269,8 +325,12 @@ daily_product_single = (
 )
 
 # -----------------------------------------------------
-# Step 8: Monthly & YTD Aggregations
+# Step 8: Monthly & YTD Aggregations (Now with 'month_date' & 'year_date')
 # -----------------------------------------------------
+
+# For monthly tables, create a 'month_date' column that is the first day of that month
+# so you can use it as a time column in Superset for filters like "Last month".
+# We'll use Spark's make_date function (Spark >= 3.0).
 
 # A. Monthly Global
 monthly_global = (
@@ -291,7 +351,9 @@ monthly_global = (
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
-    .withColumn("risk_rating", monthly_risk_rating(col("threat_index")))
+    .withColumn("risk_rating", monthly_global_risk_expr(col("threat_index")))
+    # Create a 'month_date' for the first day of that month
+    .withColumn("month_date", F.to_date(F.expr("make_date(year_published, month_published, 1)")))
 )
 
 monthly_global.write.format("iceberg") \
@@ -319,7 +381,8 @@ monthly_vendor = (
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
-    .withColumn("risk_rating", monthly_risk_rating(col("threat_index")))
+    .withColumn("risk_rating", monthly_vendor_risk_expr(col("threat_index")))
+    .withColumn("month_date", F.to_date(F.expr("make_date(year_published, month_published, 1)")))
 )
 
 monthly_vendor.write.format("iceberg") \
@@ -347,7 +410,8 @@ monthly_product = (
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
-    .withColumn("risk_rating", monthly_risk_rating(col("threat_index")))
+    .withColumn("risk_rating", monthly_product_risk_expr(col("threat_index")))
+    .withColumn("month_date", F.to_date(F.expr("make_date(year_published, month_published, 1)")))
 )
 
 monthly_product.write.format("iceberg") \
@@ -357,6 +421,7 @@ monthly_product.write.format("iceberg") \
     .saveAsTable(f"{database_name}.cve_production_monthly_product")
 
 # D. YTD Global
+# We'll add a 'year_date' = first day of that year (January 1).
 ytd_global = (
     production_df
     .groupBy("year_published")
@@ -375,7 +440,8 @@ ytd_global = (
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
-    .withColumn("risk_rating", ytd_risk_rating(col("threat_index")))
+    .withColumn("risk_rating", ytd_global_risk_expr(col("threat_index")))
+    .withColumn("year_date", F.to_date(F.expr("make_date(year_published, 1, 1)")))
 )
 
 ytd_global.write.format("iceberg") \
@@ -403,7 +469,8 @@ ytd_vendor = (
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
-    .withColumn("risk_rating", ytd_risk_rating(col("threat_index")))
+    .withColumn("risk_rating", ytd_vendor_risk_expr(col("threat_index")))
+    .withColumn("year_date", F.to_date(F.expr("make_date(year_published, 1, 1)")))
 )
 
 ytd_vendor.write.format("iceberg") \
@@ -431,7 +498,8 @@ ytd_product = (
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
     .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
-    .withColumn("risk_rating", ytd_risk_rating(col("threat_index")))
+    .withColumn("risk_rating", ytd_product_risk_expr(col("threat_index")))
+    .withColumn("year_date", F.to_date(F.expr("make_date(year_published, 1, 1)")))
 )
 
 ytd_product.write.format("iceberg") \
@@ -444,7 +512,6 @@ ytd_product.write.format("iceberg") \
 # Step 9: Running Total (Cumulative) Views on Deduplicated Daily Aggregates
 # -----------------------------------------------------
 
-# A. Global Running Total (reset each year)
 window_global = Window.partitionBy("year_published") \
     .orderBy("datePublished") \
     .rowsBetween(Window.unboundedPreceding, Window.currentRow)
@@ -452,7 +519,7 @@ window_global = Window.partitionBy("year_published") \
 daily_global_running = (
     daily_global_single
     .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(window_global), 2))
-    .withColumn("running_risk_rating", ytd_risk_rating(col("cumulative_threat_index")))
+    .withColumn("running_risk_rating", daily_global_risk_expr(col("cumulative_threat_index")))
 )
 
 daily_global_running.write.format("iceberg") \
@@ -461,7 +528,6 @@ daily_global_running.write.format("iceberg") \
     .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_global_running/") \
     .saveAsTable(f"{database_name}.cve_production_daily_global_running")
 
-# B. Vendor Running Total (per vendor, reset each year)
 window_vendor = Window.partitionBy("vendor", "year_published") \
     .orderBy("datePublished") \
     .rowsBetween(Window.unboundedPreceding, Window.currentRow)
@@ -469,7 +535,7 @@ window_vendor = Window.partitionBy("vendor", "year_published") \
 daily_vendor_running = (
     daily_vendor_single
     .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(window_vendor), 2))
-    .withColumn("running_risk_rating", ytd_risk_rating(col("cumulative_threat_index")))
+    .withColumn("running_risk_rating", daily_vendor_risk_expr(col("cumulative_threat_index")))
 )
 
 daily_vendor_running.write.format("iceberg") \
@@ -478,7 +544,6 @@ daily_vendor_running.write.format("iceberg") \
     .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_vendor_running/") \
     .saveAsTable(f"{database_name}.cve_production_daily_vendor_running")
 
-# C. Product Running Total (per vendor & product, reset each year)
 window_product = Window.partitionBy("vendor", "product", "year_published") \
     .orderBy("datePublished") \
     .rowsBetween(Window.unboundedPreceding, Window.currentRow)
@@ -486,7 +551,7 @@ window_product = Window.partitionBy("vendor", "product", "year_published") \
 daily_product_running = (
     daily_product_single
     .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(window_product), 2))
-    .withColumn("running_risk_rating", ytd_risk_rating(col("cumulative_threat_index")))
+    .withColumn("running_risk_rating", daily_product_risk_expr(col("cumulative_threat_index")))
 )
 
 daily_product_running.write.format("iceberg") \
