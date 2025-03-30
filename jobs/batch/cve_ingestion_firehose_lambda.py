@@ -60,11 +60,11 @@ def recursive_split(record, max_size):
     """
     Recursively splits the record along the candidate key (whose value is a list)
     that contributes the most to the record size, until the JSON-serialized record
-    (with a newline) is under Firehose's size limit.
+    (with a newline) is under the given max_size.
     This function preserves all data.
     """
     encoded = (json.dumps(record) + "\n").encode('utf-8')
-    if len(encoded) <= 1024000:
+    if len(encoded) <= max_size:
         return [record]
     
     candidate_keys = [k for k, v in record.items() if isinstance(v, list) and len(v) > 1]
@@ -83,11 +83,23 @@ def recursive_split(record, max_size):
         return [record]
     
     lst = record[key_to_split]
+    if len(lst) <= 1:
+        log_message(f"WARNING: Cannot split further on key '{key_to_split}'; returning record as-is.")
+        return [record]
+    
     mid = len(lst) // 2
     rec1 = record.copy()
     rec2 = record.copy()
     rec1[key_to_split] = lst[:mid]
     rec2[key_to_split] = lst[mid:]
+    
+    # Guard: Check if splitting reduces the size
+    original_size = measure_json_size(record)
+    size_rec1 = measure_json_size(rec1)
+    size_rec2 = measure_json_size(rec2)
+    if size_rec1 >= original_size or size_rec2 >= original_size:
+        log_message("WARNING: Recursive split did not reduce size; returning original record to avoid infinite recursion.")
+        return [record]
     
     return recursive_split(rec1, max_size) + recursive_split(rec2, max_size)
 
@@ -96,27 +108,28 @@ def even_split_record(record, max_size):
     Splits the record evenly based on total size.
     This function estimates the number of chunks needed based on the record's size
     and splits each candidate key (list-type) evenly.
-    If any chunk still exceeds max_size, it is recursively split.
+    If any chunk still exceeds max_size, it is further split.
     """
     current_size = measure_json_size(record)
     if current_size <= max_size:
         return [record]
     
-    candidate_keys = [k for k, v in record.items() if isinstance(v, list)]
+    candidate_keys = [k for k, v in record.items() if isinstance(v, list) and len(v) > 0]
     base_record = {k: record[k] for k in record if k not in candidate_keys}
     base_size = measure_json_size(base_record)
     if base_size + SAFETY_MARGIN >= max_size:
         log_message("WARNING: Base record itself is too large!")
         return [record]
     
-    desired_chunks = math.ceil(current_size / (max_size - SAFETY_MARGIN))
+    # Force at least two chunks
+    desired_chunks = max(2, math.ceil(current_size / (max_size - SAFETY_MARGIN)))
     log_message(f"Even splitting into {desired_chunks} chunk(s) based on total size {current_size} bytes.")
     
     split_data = {}
     for key in candidate_keys:
         lst = record.get(key, [])
         n = len(lst)
-        chunk_size = max(1, math.ceil(n / desired_chunks)) if desired_chunks > 0 else n
+        chunk_size = max(1, math.ceil(n / desired_chunks))
         split_data[key] = [lst[i:i+chunk_size] for i in range(0, n, chunk_size)]
         while len(split_data[key]) < desired_chunks:
             split_data[key].append([])
@@ -126,8 +139,15 @@ def even_split_record(record, max_size):
         new_chunk = base_record.copy()
         for key in candidate_keys:
             new_chunk[key] = split_data[key][i] if i < len(split_data[key]) else []
-        if measure_json_size(new_chunk) + SAFETY_MARGIN > max_size:
-            sub_chunks = even_split_record(new_chunk, max_size)
+        
+        new_chunk_size = measure_json_size(new_chunk)
+        if new_chunk_size + SAFETY_MARGIN > max_size:
+            # If splitting did not reduce the size, fall back to recursive_split to avoid an infinite loop.
+            if new_chunk_size >= current_size:
+                log_message("WARNING: Even split did not reduce size; using recursive split on this chunk.")
+                sub_chunks = recursive_split(new_chunk, max_size)
+            else:
+                sub_chunks = even_split_record(new_chunk, max_size)
             chunks.extend(sub_chunks)
         else:
             chunks.append(new_chunk)
@@ -143,7 +163,7 @@ def split_record(record, max_size):
     final_chunks = []
     for chunk in chunks:
         encoded = (json.dumps(chunk) + "\n").encode('utf-8')
-        if len(encoded) > 1024000:
+        if len(encoded) > max_size:
             sub_chunks = recursive_split(chunk, max_size)
             final_chunks.extend(sub_chunks)
         else:
@@ -213,7 +233,7 @@ def lambda_handler(event, context):
         for chunk in record_chunks:
             record_str = json.dumps(chunk) + "\n"
             encoded_record = record_str.encode('utf-8')
-            if len(encoded_record) > 1024000:
+            if len(encoded_record) > MAX_RECORD_SIZE:
                 log_message("Warning: A chunk still exceeds Firehose limit; skipping this chunk.")
                 continue
             firehose_records.append({'Data': encoded_record})
