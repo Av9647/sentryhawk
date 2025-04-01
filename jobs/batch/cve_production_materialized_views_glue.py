@@ -512,52 +512,53 @@ ytd_product.write.format("iceberg") \
 # Step 9: Running Total (Cumulative) Views on Deduplicated Daily Aggregates
 # -----------------------------------------------------
 
-window_global = Window.partitionBy("year_published") \
-    .orderBy("datePublished") \
+# A. Global Running Total
+window_global = Window.orderBy("datePublished") \
     .rowsBetween(Window.unboundedPreceding, Window.currentRow)
 
 daily_global_running = (
     daily_global_single
     .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(window_global), 2))
-    .withColumn("running_risk_rating", daily_global_risk_expr(col("cumulative_threat_index")))
+    .withColumn("running_risk_rating", ytd_global_risk_expr(col("cumulative_threat_index")))  # Can reuse YTD logic
 )
 
 daily_global_running.write.format("iceberg") \
     .mode("overwrite") \
-    .partitionBy("year_published") \
     .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_global_running/") \
     .saveAsTable(f"{database_name}.cve_production_daily_global_running")
 
-window_vendor = Window.partitionBy("vendor", "year_published") \
+# B. Vendor Running Total
+window_vendor = Window.partitionBy("vendor") \
     .orderBy("datePublished") \
     .rowsBetween(Window.unboundedPreceding, Window.currentRow)
 
 daily_vendor_running = (
     daily_vendor_single
     .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(window_vendor), 2))
-    .withColumn("running_risk_rating", daily_vendor_risk_expr(col("cumulative_threat_index")))
+    .withColumn("running_risk_rating", ytd_vendor_risk_expr(col("cumulative_threat_index")))
 )
 
 daily_vendor_running.write.format("iceberg") \
     .mode("overwrite") \
-    .partitionBy("vendor", "year_published") \
+    .partitionBy("vendor") \
     .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_vendor_running/") \
     .saveAsTable(f"{database_name}.cve_production_daily_vendor_running")
 
-window_product = Window.partitionBy("vendor", "product", "year_published") \
+# C. Product Running Total
+window_product = Window.partitionBy("vendor", "product") \
     .orderBy("datePublished") \
     .rowsBetween(Window.unboundedPreceding, Window.currentRow)
 
 daily_product_running = (
     daily_product_single
     .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(window_product), 2))
-    .withColumn("running_risk_rating", daily_product_risk_expr(col("cumulative_threat_index")))
+    .withColumn("running_risk_rating", ytd_product_risk_expr(col("cumulative_threat_index")))
 )
 
 daily_product_running.write.format("iceberg") \
     .mode("overwrite") \
-    .partitionBy("vendor", "product", "year_published") \
+    .partitionBy("vendor", "product") \
     .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_product_running/") \
     .saveAsTable(f"{database_name}.cve_production_daily_product_running")
 
-print("All aggregated views (daily, monthly, YTD, and running total with deduplication) created successfully.")
+print("All true cumulative views created successfully.")
