@@ -222,7 +222,6 @@ daily_global = (
     .agg(
         countDistinct("cveId").alias("total_cves"),
         round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
-        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
         countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
         countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
         countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
@@ -233,7 +232,6 @@ daily_global = (
         countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
-    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
     .withColumn("risk_rating", daily_global_risk_expr(col("threat_index")))
 )
 
@@ -250,7 +248,6 @@ daily_vendor = (
     .agg(
         countDistinct("cveId").alias("total_cves"),
         round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
-        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
         countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
         countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
         countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
@@ -261,7 +258,6 @@ daily_vendor = (
         countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
-    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
     .withColumn("risk_rating", daily_vendor_risk_expr(col("threat_index")))
 )
 
@@ -278,7 +274,6 @@ daily_product = (
     .agg(
         countDistinct("cveId").alias("total_cves"),
         round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
-        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
         countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
         countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
         countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
@@ -289,7 +284,6 @@ daily_product = (
         countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
-    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
     .withColumn("risk_rating", daily_product_risk_expr(col("threat_index")))
 )
 
@@ -339,7 +333,6 @@ monthly_global = (
     .agg(
         countDistinct("cveId").alias("total_cves"),
         round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
-        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
         countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
         countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
         countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
@@ -350,7 +343,6 @@ monthly_global = (
         countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
-    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
     .withColumn("risk_rating", monthly_global_risk_expr(col("threat_index")))
     # Create a 'month_date' for the first day of that month
     .withColumn("month_date", F.to_date(F.expr("make_date(year_published, month_published, 1)")))
@@ -369,7 +361,6 @@ monthly_vendor = (
     .agg(
         countDistinct("cveId").alias("total_cves"),
         round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
-        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
         countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
         countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
         countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
@@ -380,7 +371,6 @@ monthly_vendor = (
         countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
-    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
     .withColumn("risk_rating", monthly_vendor_risk_expr(col("threat_index")))
     .withColumn("month_date", F.to_date(F.expr("make_date(year_published, month_published, 1)")))
 )
@@ -398,7 +388,6 @@ monthly_product = (
     .agg(
         countDistinct("cveId").alias("total_cves"),
         round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
-        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
         countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
         countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
         countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
@@ -409,7 +398,6 @@ monthly_product = (
         countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
-    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
     .withColumn("risk_rating", monthly_product_risk_expr(col("threat_index")))
     .withColumn("month_date", F.to_date(F.expr("make_date(year_published, month_published, 1)")))
 )
@@ -428,7 +416,6 @@ ytd_global = (
     .agg(
         countDistinct("cveId").alias("total_cves"),
         round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
-        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
         countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
         countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
         countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
@@ -439,7 +426,6 @@ ytd_global = (
         countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
-    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
     .withColumn("risk_rating", ytd_global_risk_expr(col("threat_index")))
     .withColumn("year_date", F.to_date(F.expr("make_date(year_published, 1, 1)")))
 )
@@ -457,7 +443,6 @@ ytd_vendor = (
     .agg(
         countDistinct("cveId").alias("total_cves"),
         round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
-        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
         countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
         countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
         countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
@@ -468,7 +453,6 @@ ytd_vendor = (
         countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
-    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
     .withColumn("risk_rating", ytd_vendor_risk_expr(col("threat_index")))
     .withColumn("year_date", F.to_date(F.expr("make_date(year_published, 1, 1)")))
 )
@@ -486,7 +470,6 @@ ytd_product = (
     .agg(
         countDistinct("cveId").alias("total_cves"),
         round_col(sumDistinct(weighted_score), 2).alias("threat_index"),
-        round_col(avg(col("cvssScore")), 2).alias("avg_cvss"),
         countDistinct(when(col("severity") == "Critical", col("cveId"))).alias("critical_count"),
         countDistinct(when(col("severity") == "High", col("cveId"))).alias("high_count"),
         countDistinct(when(col("severity") == "Medium", col("cveId"))).alias("medium_count"),
@@ -497,7 +480,6 @@ ytd_product = (
         countDistinct(when(col("is_low_priv"), col("cveId"))).alias("low_priv_cves"),
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
-    .withColumn("avg_threat_per_cve", round_col(col("threat_index") / col("total_cves"), 2))
     .withColumn("risk_rating", ytd_product_risk_expr(col("threat_index")))
     .withColumn("year_date", F.to_date(F.expr("make_date(year_published, 1, 1)")))
 )
