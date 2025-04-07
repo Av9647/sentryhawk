@@ -1,0 +1,59 @@
+{
+  "type": "index_parallel",
+  "spec": {
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "s3",
+        "prefixes": [
+          "s3://cve-production/cve_production_tables/cve_production_monthly_product/data/"
+        ],
+        "objectGlob": "**/*.parquet"
+      },
+      "inputFormat": {
+        "type": "parquet"
+      }
+    },
+    "tuningConfig": {
+      "type": "index_parallel",
+      "maxNumConcurrentSubTasks": 4,
+      "maxRowsPerSegment": 5000000,
+      "maxRowsInMemory": 500000,
+      "handoffConditionTimeout": 0,
+      "logParseExceptions": false
+    },
+    "dataSchema": {
+      "dataSource": "cve_production_monthly_product",
+      "timestampSpec": {
+        "column": "month_date",
+        "format": "auto"
+      },
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "day",
+        "queryGranularity": "none",
+        "rollup": false
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "vendor",
+          "product",
+          "year_published",
+          "month_published",
+          "total_cves",
+          "threat_index",
+          "critical_count",
+          "high_count",
+          "medium_count",
+          "low_count",
+          "network_threat_index",
+          "network_cves",
+          "no_ui_cves",
+          "low_priv_cves",
+          "fully_critical_cves",
+          "risk_rating"
+        ]
+      }
+    }
+  }
+}
