@@ -36,23 +36,24 @@
       },
       "dimensionsSpec": {
         "dimensions": [
-          "vendor",
-          "product",
-          "year_published",
-          "total_cves",
-          "threat_index",
-          "critical_count",
-          "high_count",
-          "medium_count",
-          "low_count",
-          "network_threat_index",
-          "network_cves",
-          "no_ui_cves",
-          "low_priv_cves",
-          "fully_critical_cves",
-          "risk_rating",
-          "cumulative_threat_index",
-          "running_risk_rating"
+          { "type": "string", "name": "vendor" },
+          { "type": "string", "name": "product" },
+          { "type": "string", "name": "datePublished" },
+          { "type": "long",   "name": "year_published" },
+          { "type": "long",   "name": "total_cves" },
+          { "type": "double", "name": "threat_index" },
+          { "type": "long",   "name": "critical_count" },
+          { "type": "long",   "name": "high_count" },
+          { "type": "long",   "name": "medium_count" },
+          { "type": "long",   "name": "low_count" },
+          { "type": "double", "name": "network_threat_index" },
+          { "type": "long",   "name": "network_cves" },
+          { "type": "long",   "name": "no_ui_cves" },
+          { "type": "long",   "name": "low_priv_cves" },
+          { "type": "long",   "name": "fully_critical_cves" },
+          { "type": "string", "name": "risk_rating" },
+          { "type": "double", "name": "cumulative_threat_index" },
+          { "type": "string", "name": "running_risk_rating" }
         ]
       }
     }

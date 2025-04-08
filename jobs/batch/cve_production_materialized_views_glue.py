@@ -1,13 +1,16 @@
 import sys
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.functions import (
-    when, to_date, year, month, col, countDistinct, sumDistinct, avg,
-    regexp_extract, expr, lit, round as round_col, row_number
+    when, to_date, year, month, col, countDistinct, sumDistinct, expr, lit,
+    row_number, trim, regexp_extract
 )
 from pyspark.sql.window import Window
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from pyspark.context import SparkContext
+
+def round_col(col_expr, scale):
+    return F.round(col_expr.cast("double"), scale)
 
 # --- Initialize Glue and Spark ---
 args = getResolvedOptions(sys.argv, ['JOB_NAME'])
@@ -23,50 +26,129 @@ spark = SparkSession.builder \
 # Set database name
 database_name = "cve_db"
 
-# Read production table (only current records)
+# Read production table (only current SCD2 records)
 production_df = spark.table(f"{database_name}.cve_production_master").filter("currentFlag = true")
 
+# ----------------------------------------------------------------------
+# Creation of the Lookup Table "cve_production_lookup"
+# ----------------------------------------------------------------------
+lookup_df = production_df \
+    .withColumn("year_published", year(col("datePublished"))) \
+    .withColumn("chosenCvss", expr("""
+      CASE 
+        WHEN cvssData IS NULL OR size(cvssData) = 0 THEN 
+          named_struct(
+              'source', '', 
+              'type', '', 
+              'version', '', 
+              'vectorString', '', 
+              'baseScore', CAST(NULL AS DOUBLE), 
+              'impactScore', CAST(NULL AS DOUBLE), 
+              'exploitabilityScore', CAST(NULL AS DOUBLE)
+          )
+        ELSE aggregate(
+          filter(coalesce(cvssData, array()), x -> x IS NOT NULL AND x.baseScore IS NOT NULL),
+          cast(null as struct<source:string, type:string, version:string, vectorString:string, baseScore:double, impactScore:double, exploitabilityScore:double>),
+          (acc, x) -> CASE WHEN acc IS NULL OR x.baseScore > acc.baseScore THEN x ELSE acc END,
+          acc -> acc
+        )
+      END
+    """)) \
+    .withColumn("cvssScore", F.col("chosenCvss.baseScore").cast("double")) \
+    .withColumn("cvssVersion", F.col("chosenCvss.version")) \
+    .withColumn("severity", 
+                F.when(F.col("chosenCvss.baseScore") >= 9.0, "Critical")
+                 .when(F.col("chosenCvss.baseScore") >= 7.0, "High")
+                 .when(F.col("chosenCvss.baseScore") >= 4.0, "Medium")
+                 .when(F.col("chosenCvss.baseScore").isNotNull(), "Low")
+                 .otherwise(lit(""))) \
+    .withColumn("source", F.coalesce(F.col("chosenCvss.source"), F.lit(""))) \
+    .withColumn("sourceType", F.coalesce(F.col("chosenCvss.type"), F.lit(""))) \
+    .withColumn("vectorString", F.coalesce(F.col("chosenCvss.vectorString"), F.lit(""))) \
+    .withColumn("impactScore", F.col("chosenCvss.impactScore").cast("double")) \
+    .withColumn("exploitabilityScore", F.col("chosenCvss.exploitabilityScore").cast("double")) \
+    .withColumn("cweData", expr("""
+         array_join(
+             transform(coalesce(cweData, array()), x -> 
+                 CASE 
+                   WHEN x.cweDescription IS NOT NULL AND trim(x.cweDescription) != '' 
+                   THEN x.cweDescription 
+                   ELSE x.cweId 
+                 END),
+             ', '
+         )
+    """)) \
+    .withColumn("capecData", expr("""
+         array_join(
+             transform(coalesce(capecData, array()), x -> 
+                 CASE 
+                   WHEN x.capecDescription IS NOT NULL AND trim(x.capecDescription) != '' 
+                   THEN x.capecDescription 
+                   ELSE x.capecId 
+                 END),
+             ', '
+         )
+    """)) \
+    .withColumn("cweData", F.coalesce(F.col("cweData"), F.lit(""))) \
+    .withColumn("capecData", F.coalesce(F.col("capecData"), F.lit(""))) \
+    .withColumn("cvssData", F.to_json(col("cvssData")))  \
+
+lookup_df = lookup_df.select(
+    "datePublished", "vendor", "product", "cveId", "descriptions", "cvssScore", 
+    "severity", "vectorString", "impactScore", "exploitabilityScore", "source",
+    "sourceType", "cvssVersion", "vulnStatus", "cweData", "capecData", "cvssData", 
+    "dateReserved", "dateUpdated", "datePublic", "lastModified", "year_published"
+)
+
+lookup_df.write.format("iceberg") \
+    .mode("overwrite") \
+    .partitionBy("year_published") \
+    .option("path", "s3://cve-production/cve_production_tables/cve_production_lookup/") \
+    .saveAsTable(f"{database_name}.cve_production_lookup")
+
+# -----------------------------------------------------
+# Aggregated Materialized Views
 # -----------------------------------------------------
 # Step 1: Extract the Best CVSS Vector Based on Latest Version
-# -----------------------------------------------------
 production_df = production_df.withColumn("latest_version", expr(
-    "array_max(transform(cvssData, x -> x.version))"
+    "array_max(transform(coalesce(cvssData, array()), x -> x.version))"
 ))
-
-production_df = production_df.withColumn("latest_entry", expr("""
-aggregate(
-  filter(cvssData, x -> x.version = latest_version and x.baseScore is not null),
-  named_struct('bestScore', cast(0.0 as decimal(10,2)), 'bestVector', cast(null as string)),
-  (acc, x) -> IF(x.baseScore > acc.bestScore,
-                  named_struct('bestScore', cast(x.baseScore as decimal(10,2)), 'bestVector', x.vectorString),
-                  acc)
-)
+production_df = production_df.withColumn("chosenCvss", expr("""
+  CASE 
+    WHEN cvssData IS NULL OR size(cvssData) = 0 THEN 
+      named_struct('source','', 'type','', 'version','', 'vectorString','', 'baseScore', CAST(NULL AS DOUBLE), 'impactScore', CAST(NULL AS DOUBLE), 'exploitabilityScore', CAST(NULL AS DOUBLE))
+    ELSE aggregate(
+      filter(coalesce(cvssData, array()), x -> x IS NOT NULL AND x.baseScore IS NOT NULL),
+      cast(null as struct<source:string, type:string, version:string, vectorString:string, baseScore:double, impactScore:double, exploitabilityScore:double>),
+      (acc, x) -> CASE WHEN acc IS NULL OR x.baseScore > acc.baseScore THEN x ELSE acc END,
+      acc -> acc
+    )
+  END
 """))
-
-production_df = production_df.withColumn("latest_baseScore", col("latest_entry.bestScore")) \
-                             .withColumn("latest_vector", col("latest_entry.bestVector"))
+production_df = production_df.withColumn("cvssScore", col("chosenCvss.baseScore")) \
+                             .withColumn("cvssVersion", col("chosenCvss.version"))
 
 # -----------------------------------------------------
 # Step 2: Parse the Latest CVSS Vector Depending on Version
 # -----------------------------------------------------
-production_df = production_df.withColumn("AV", regexp_extract(col("latest_vector"), "AV:([^/]+)", 1)) \
-    .withColumn("AC", regexp_extract(col("latest_vector"), "AC:([^/]+)", 1)) \
-    .withColumn("C",  regexp_extract(col("latest_vector"), "C:([^/]+)", 1)) \
-    .withColumn("I",  regexp_extract(col("latest_vector"), "I:([^/]+)", 1)) \
-    .withColumn("A",  regexp_extract(col("latest_vector"), "A:([^/]+)", 1))
-
+# NOTE: We replace references to latest_vector with chosenCvss.vectorString.
+production_df = production_df.withColumn("AV", regexp_extract(col("chosenCvss.vectorString"), "AV:([^/]+)", 1)) \
+    .withColumn("AC", regexp_extract(col("chosenCvss.vectorString"), "AC:([^/]+)", 1)) \
+    .withColumn("C",  regexp_extract(col("chosenCvss.vectorString"), "C:([^/]+)", 1)) \
+    .withColumn("I",  regexp_extract(col("chosenCvss.vectorString"), "I:([^/]+)", 1)) \
+    .withColumn("A",  regexp_extract(col("chosenCvss.vectorString"), "A:([^/]+)", 1))
 production_df = production_df.withColumn("PR", when(col("cvssVersion") != "2.0",
-                                                      regexp_extract(col("latest_vector"), "PR:([^/]+)", 1))
-                                         .otherwise(lit(None))) \
+                                                      regexp_extract(col("chosenCvss.vectorString"), "PR:([^/]+)", 1))
+                                         .otherwise(lit(""))) \
     .withColumn("UI", when(col("cvssVersion") != "2.0",
-                           regexp_extract(col("latest_vector"), "UI:([^/]+)", 1))
-                .otherwise(lit(None))) \
+                           regexp_extract(col("chosenCvss.vectorString"), "UI:([^/]+)", 1))
+                .otherwise(lit(""))) \
     .withColumn("S", when(col("cvssVersion") != "2.0",
-                          regexp_extract(col("latest_vector"), "S:([^/]+)", 1))
-                .otherwise(lit(None))) \
+                          regexp_extract(col("chosenCvss.vectorString"), "S:([^/]+)", 1))
+                .otherwise(lit(""))) \
     .withColumn("Au", when(col("cvssVersion") == "2.0",
-                           regexp_extract(col("latest_vector"), "Au:([^/]+)", 1))
-                .otherwise(lit(None)))
+                           regexp_extract(col("chosenCvss.vectorString"), "Au:([^/]+)", 1))
+                .otherwise(lit("")))
 
 # -----------------------------------------------------
 # Step 3: Define Risk Flags Using CVSS Components
@@ -86,7 +168,6 @@ production_df = production_df.withColumn("is_network_based", when(col("AV") == "
     .withColumn("is_high_conf", when(col("C") == "H", True).otherwise(False)) \
     .withColumn("is_high_int", when(col("I") == "H", True).otherwise(False)) \
     .withColumn("is_high_avail", when(col("A") == "H", True).otherwise(False))
-
 production_df = production_df.withColumn(
     "is_fully_critical",
     when(
@@ -155,19 +236,19 @@ def monthly_global_risk_expr(ti):
     return (
         when(ti.isNull(), "Unknown")
         .when(ti > 120, "Severe")
-        .when(ti > 80,  "High")
-        .when(ti > 50,  "Moderate")
-        .when(ti > 0,   "Low")
+        .when(ti > 80, "High")
+        .when(ti > 50, "Moderate")
+        .when(ti > 0, "Low")
         .otherwise("No Risk")
     )
 
 def monthly_vendor_risk_expr(ti):
     return (
         when(ti.isNull(), "Unknown")
-        .when(ti > 80,  "Severe")
-        .when(ti > 43,  "High")
-        .when(ti > 20,  "Moderate")
-        .when(ti > 0,   "Low")
+        .when(ti > 80, "Severe")
+        .when(ti > 43, "High")
+        .when(ti > 20, "Moderate")
+        .when(ti > 0, "Low")
         .otherwise("No Risk")
     )
 
@@ -176,8 +257,8 @@ def monthly_product_risk_expr(ti):
         when(ti.isNull(), "Unknown")
         .when(ti > 25, "Severe")
         .when(ti > 14, "High")
-        .when(ti > 7,  "Moderate")
-        .when(ti > 0,  "Low")
+        .when(ti > 7, "Moderate")
+        .when(ti > 0, "Low")
         .otherwise("No Risk")
     )
 
@@ -186,8 +267,8 @@ def ytd_global_risk_expr(ti):
         when(ti.isNull(), "Unknown")
         .when(ti > 180, "Severe")
         .when(ti > 135, "High")
-        .when(ti > 90,  "Moderate")
-        .when(ti > 0,   "Low")
+        .when(ti > 90, "Moderate")
+        .when(ti > 0, "Low")
         .otherwise("No Risk")
     )
 
@@ -195,9 +276,9 @@ def ytd_vendor_risk_expr(ti):
     return (
         when(ti.isNull(), "Unknown")
         .when(ti > 105, "Severe")
-        .when(ti > 60,  "High")
-        .when(ti > 15,  "Moderate")
-        .when(ti > 0,   "Low")
+        .when(ti > 60, "High")
+        .when(ti > 15, "Moderate")
+        .when(ti > 0, "Low")
         .otherwise("No Risk")
     )
 
@@ -206,15 +287,14 @@ def ytd_product_risk_expr(ti):
         when(ti.isNull(), "Unknown")
         .when(ti > 40, "Severe")
         .when(ti > 15, "High")
-        .when(ti > 7,  "Moderate")
-        .when(ti > 0,  "Low")
+        .when(ti > 7, "Moderate")
+        .when(ti > 0, "Low")
         .otherwise("No Risk")
     )
 
 # -----------------------------------------------------
 # Step 7: Daily Aggregations
 # -----------------------------------------------------
-
 # A. Daily Global
 daily_global = (
     production_df
@@ -234,7 +314,6 @@ daily_global = (
     )
     .withColumn("risk_rating", daily_global_risk_expr(col("threat_index")))
 )
-
 daily_global.write.format("iceberg") \
     .mode("overwrite") \
     .partitionBy("year_published") \
@@ -260,10 +339,9 @@ daily_vendor = (
     )
     .withColumn("risk_rating", daily_vendor_risk_expr(col("threat_index")))
 )
-
 daily_vendor.write.format("iceberg") \
     .mode("overwrite") \
-    .partitionBy("year_published") \
+    .partitionBy("vendor") \
     .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_vendor/") \
     .saveAsTable(f"{database_name}.cve_production_daily_vendor")
 
@@ -286,17 +364,15 @@ daily_product = (
     )
     .withColumn("risk_rating", daily_product_risk_expr(col("threat_index")))
 )
-
 daily_product.write.format("iceberg") \
     .mode("overwrite") \
-    .partitionBy("year_published") \
+    .partitionBy("vendor", "product") \
     .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_product/") \
     .saveAsTable(f"{database_name}.cve_production_daily_product")
 
 # -----------------------------------------------------
-# Step 7a: Deduplication
+# Step 7a: Deduplication of Daily Aggregations
 # -----------------------------------------------------
-
 w_global_dedupe = Window.partitionBy("datePublished").orderBy(F.desc("year_published"))
 daily_global_single = (
     daily_global.withColumn("row_num", row_number().over(w_global_dedupe))
@@ -319,13 +395,8 @@ daily_product_single = (
 )
 
 # -----------------------------------------------------
-# Step 8: Monthly & YTD Aggregations (Now with 'month_date' & 'year_date')
+# Step 8: Monthly & YTD Aggregations
 # -----------------------------------------------------
-
-# For monthly tables, create a 'month_date' column that is the first day of that month
-# so you can use it as a time column in Superset for filters like "Last month".
-# We'll use Spark's make_date function (Spark >= 3.0).
-
 # A. Monthly Global
 monthly_global = (
     production_df
@@ -344,10 +415,8 @@ monthly_global = (
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves")
     )
     .withColumn("risk_rating", monthly_global_risk_expr(col("threat_index")))
-    # Create a 'month_date' for the first day of that month
     .withColumn("month_date", F.to_date(F.expr("make_date(year_published, month_published, 1)")))
 )
-
 monthly_global.write.format("iceberg") \
     .mode("overwrite") \
     .partitionBy("year_published", "month_published") \
@@ -374,7 +443,6 @@ monthly_vendor = (
     .withColumn("risk_rating", monthly_vendor_risk_expr(col("threat_index")))
     .withColumn("month_date", F.to_date(F.expr("make_date(year_published, month_published, 1)")))
 )
-
 monthly_vendor.write.format("iceberg") \
     .mode("overwrite") \
     .partitionBy("year_published", "month_published") \
@@ -401,7 +469,6 @@ monthly_product = (
     .withColumn("risk_rating", monthly_product_risk_expr(col("threat_index")))
     .withColumn("month_date", F.to_date(F.expr("make_date(year_published, month_published, 1)")))
 )
-
 monthly_product.write.format("iceberg") \
     .mode("overwrite") \
     .partitionBy("year_published", "month_published") \
@@ -409,7 +476,6 @@ monthly_product.write.format("iceberg") \
     .saveAsTable(f"{database_name}.cve_production_monthly_product")
 
 # D. YTD Global
-# We'll add a 'year_date' = first day of that year (January 1).
 ytd_global = (
     production_df
     .groupBy("year_published")
@@ -429,7 +495,6 @@ ytd_global = (
     .withColumn("risk_rating", ytd_global_risk_expr(col("threat_index")))
     .withColumn("year_date", F.to_date(F.expr("make_date(year_published, 1, 1)")))
 )
-
 ytd_global.write.format("iceberg") \
     .mode("overwrite") \
     .partitionBy("year_published") \
@@ -456,7 +521,6 @@ ytd_vendor = (
     .withColumn("risk_rating", ytd_vendor_risk_expr(col("threat_index")))
     .withColumn("year_date", F.to_date(F.expr("make_date(year_published, 1, 1)")))
 )
-
 ytd_vendor.write.format("iceberg") \
     .mode("overwrite") \
     .partitionBy("year_published") \
@@ -483,7 +547,6 @@ ytd_product = (
     .withColumn("risk_rating", ytd_product_risk_expr(col("threat_index")))
     .withColumn("year_date", F.to_date(F.expr("make_date(year_published, 1, 1)")))
 )
-
 ytd_product.write.format("iceberg") \
     .mode("overwrite") \
     .partitionBy("year_published") \
@@ -493,17 +556,14 @@ ytd_product.write.format("iceberg") \
 # -----------------------------------------------------
 # Step 9: Running Total (Cumulative) Views on Deduplicated Daily Aggregates
 # -----------------------------------------------------
-
 # A. Global Running Total
 window_global = Window.orderBy("datePublished") \
     .rowsBetween(Window.unboundedPreceding, Window.currentRow)
-
 daily_global_running = (
     daily_global_single
     .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(window_global), 2))
-    .withColumn("running_risk_rating", ytd_global_risk_expr(col("cumulative_threat_index")))  # Can reuse YTD logic
+    .withColumn("running_risk_rating", ytd_global_risk_expr(col("cumulative_threat_index")))
 )
-
 daily_global_running.write.format("iceberg") \
     .mode("overwrite") \
     .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_global_running/") \
@@ -513,13 +573,11 @@ daily_global_running.write.format("iceberg") \
 window_vendor = Window.partitionBy("vendor") \
     .orderBy("datePublished") \
     .rowsBetween(Window.unboundedPreceding, Window.currentRow)
-
 daily_vendor_running = (
     daily_vendor_single
     .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(window_vendor), 2))
     .withColumn("running_risk_rating", ytd_vendor_risk_expr(col("cumulative_threat_index")))
 )
-
 daily_vendor_running.write.format("iceberg") \
     .mode("overwrite") \
     .partitionBy("vendor") \
@@ -530,17 +588,15 @@ daily_vendor_running.write.format("iceberg") \
 window_product = Window.partitionBy("vendor", "product") \
     .orderBy("datePublished") \
     .rowsBetween(Window.unboundedPreceding, Window.currentRow)
-
 daily_product_running = (
     daily_product_single
     .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(window_product), 2))
     .withColumn("running_risk_rating", ytd_product_risk_expr(col("cumulative_threat_index")))
 )
-
 daily_product_running.write.format("iceberg") \
     .mode("overwrite") \
     .partitionBy("vendor", "product") \
     .option("path", "s3://cve-production/cve_production_tables/cve_production_daily_product_running/") \
     .saveAsTable(f"{database_name}.cve_production_daily_product_running")
 
-print("All true cumulative views created successfully.")
+print("All materialized views and lookup table created successfully.")
