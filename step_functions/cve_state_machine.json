@@ -1,0 +1,15 @@
+{
+    "Comment": "A description of my state machine",
+    "StartAt": "GetQueueAttributes",
+    "States": {
+      "GetQueueAttributes": {
+        "Type": "Task",
+        "Arguments": {
+          "QueueUrl": "MyData"
+        },
+        "Resource": "arn:aws:states:::aws-sdk:sqs:getQueueAttributes",
+        "End": true
+      }
+    },
+    "QueryLanguage": "JSONata"
+  }

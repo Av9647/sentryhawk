@@ -2,7 +2,7 @@ import sys
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.functions import (
     when, to_date, year, month, col, countDistinct, sumDistinct, expr, lit,
-    row_number, trim, regexp_extract
+    row_number, regexp_extract
 )
 from pyspark.sql.window import Window
 from awsglue.utils import getResolvedOptions
@@ -11,6 +11,17 @@ from pyspark.context import SparkContext
 
 def round_col(col_expr, scale):
     return F.round(col_expr.cast("double"), scale)
+
+# Helper function to compact timestamp strings
+def compact_timestamp_str(col_expr):
+    return F.concat(
+        # First, apply the first regex to remove trailing zeroes when some nonzero digits exist
+        F.regexp_replace(
+            F.regexp_replace(col_expr.cast("string"), r'(\.\d*?[1-9])0+$', r'\1'),
+            r'\.0+$', ''
+        ),
+        F.lit(" UTC")
+    )
 
 # --- Initialize Glue and Spark ---
 args = getResolvedOptions(sys.argv, ['JOB_NAME'])
@@ -91,7 +102,23 @@ lookup_df = production_df \
     """)) \
     .withColumn("cweData", F.coalesce(F.col("cweData"), F.lit(""))) \
     .withColumn("capecData", F.coalesce(F.col("capecData"), F.lit(""))) \
-    .withColumn("cvssData", F.to_json(col("cvssData")))  \
+    .withColumn("cvssData", F.to_json(col("cvssData"))) \
+    .withColumn("dateReserved", 
+        F.when(F.col("dateReserved").isNotNull(), compact_timestamp_str(F.col("dateReserved")))
+         .otherwise(lit(""))
+    ) \
+    .withColumn("dateUpdated", 
+        F.when(F.col("dateUpdated").isNotNull(), compact_timestamp_str(F.col("dateUpdated")))
+         .otherwise(lit(""))
+    ) \
+    .withColumn("datePublic", 
+        F.when(F.col("datePublic").isNotNull(), compact_timestamp_str(F.col("datePublic")))
+         .otherwise(lit(""))
+    ) \
+    .withColumn("lastModified", 
+        F.when(F.col("lastModified").isNotNull(), compact_timestamp_str(F.col("lastModified")))
+         .otherwise(lit(""))
+    )
 
 lookup_df = lookup_df.select(
     "datePublished", "vendor", "product", "cveId", "descriptions", "cvssScore", 
