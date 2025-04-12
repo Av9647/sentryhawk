@@ -1,15 +1,260 @@
 {
-    "Comment": "A description of my state machine",
-    "StartAt": "GetQueueAttributes",
-    "States": {
-      "GetQueueAttributes": {
-        "Type": "Task",
-        "Arguments": {
-          "QueueUrl": "MyData"
-        },
-        "Resource": "arn:aws:states:::aws-sdk:sqs:getQueueAttributes",
-        "End": true
-      }
+  "Comment": "A description of my state machine",
+  "StartAt": "Pull Vendor List",
+  "QueryLanguage": "JSONata",
+  "States": {
+    "Pull Vendor List": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Output": "{% $states.result.Payload %}",
+      "Arguments": {
+        "FunctionName": "arn:aws:lambda:us-east-2:692859941232:function:cve_ingestion_vendor_lambda:1",
+        "Payload": "{% $states.input %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Initial Wait"
     },
-    "QueryLanguage": "JSONata"
+    "Initial Wait": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "Vendor SQS Poll"
+    },
+    "Vendor SQS Poll": {
+      "Type": "Task",
+      "Arguments": {
+        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_sqs",
+        "AttributeNames": [
+          "ApproximateNumberOfMessages",
+          "ApproximateNumberOfMessagesNotVisible"
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:sqs:getQueueAttributes",
+      "Next": "Vendor Queue Check"
+    },
+    "Vendor Queue Check": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Next": "Vendor DLQ Poll",
+          "Condition": "{% (($states.input.MessagesVisible) = (0) and ($states.input.MessagesNotVisible) = (0)) %}"
+        }
+      ],
+      "Default": "Wait for Vendors"
+    },
+    "Vendor DLQ Poll": {
+      "Type": "Task",
+      "Arguments": {
+        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_sqs_dlq",
+        "AttributeNames": [
+          "ApproximateNumberOfMessages"
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:sqs:getQueueAttributes",
+      "Next": "Vendor DLQ Check"
+    },
+    "Vendor DLQ Check": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Next": "Product SQS Poll",
+          "Condition": "{% (($states.input.MessagesVisible) = (0) and ($states.input.MessagesNotVisible) = (0)) %}"
+        }
+      ],
+      "Default": "Vendors Not Processed"
+    },
+    "Product SQS Poll": {
+      "Type": "Task",
+      "Arguments": {
+        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_product_sqs",
+        "AttributeNames": [
+          "ApproximateNumberOfMessages",
+          "ApproximateNumberOfMessagesNotVisible"
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:sqs:getQueueAttributes.waitForTaskToken",
+      "Next": "Product Queue Check"
+    },
+    "Product Queue Check": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Next": "Product DLQ Poll",
+          "Condition": "{% (($states.input.MessagesVisible) = (0) and ($states.input.MessagesNotVisible) = (0)) %}"
+        }
+      ],
+      "Default": "Wait for Products"
+    },
+    "Product DLQ Poll": {
+      "Type": "Task",
+      "Arguments": {
+        "QueueUrl": "MyData"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:sqs:getQueueAttributes",
+      "Next": "Product DLQ Check"
+    },
+    "Product DLQ Check": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Next": "Wait for Firehose",
+          "Condition": "{% (($states.input.MessagesVisible) = (0) and ($states.input.MessagesNotVisible) = (0)) %}"
+        }
+      ],
+      "Default": "Products Not Processed"
+    },
+    "Wait for Firehose": {
+      "Type": "Wait",
+      "Seconds": 910,
+      "Next": "Staging Glue Run"
+    },
+    "Staging Glue Run": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Arguments": {
+        "JobName": "cve_staging_glue"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "Staging Run Failed",
+          "Next": "Staging Glue Run Failed"
+        }
+      ],
+      "Next": "Staging DQ Glue Run"
+    },
+    "Staging DQ Glue Run": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Arguments": {
+        "JobName": "cve_staging_glue_dq"
+      },
+      "Next": "Production Glue Run",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "Staging DQ Glue Run Failed",
+          "Next": "Staging DQ Glue Run Failed"
+        }
+      ]
+    },
+    "Production Glue Run": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Arguments": {
+        "JobName": "cve_production_glue"
+      },
+      "Next": "Materialized View Glue Run",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "Production Glue Run Failed",
+          "Next": "Production Glue Run Failed"
+        }
+      ]
+    },
+    "Materialized View Glue Run": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Arguments": {
+        "JobName": "cve_production_materialized_views_glue"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "Materialized View Glue Run Failed",
+          "Next": "Materialized View Glue Run Failed"
+        }
+      ],
+      "End": true
+    },
+    "Materialized View Glue Run Failed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "Arguments": {
+        "Message": "{% $states.input %}",
+        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
+      },
+      "Next": "Materialized View Glue Run"
+    },
+    "Production Glue Run Failed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "Message": "{% $states.input %}"
+      },
+      "Next": "Production Glue Run"
+    },
+    "Staging DQ Glue Run Failed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "Arguments": {
+        "Message": "{% $states.input %}",
+        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
+      },
+      "Next": "Staging DQ Glue Run"
+    },
+    "Staging Glue Run Failed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "Arguments": {
+        "Message": "{% $states.input %}",
+        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
+      },
+      "Next": "Staging Glue Run"
+    },
+    "Products Not Processed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "Message": {
+          "Message": "Product DLQ is not empty. Please investigate."
+        }
+      },
+      "Next": "Wait for Firehose"
+    },
+    "Wait for Products": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "Product SQS Poll"
+    },
+    "Vendors Not Processed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "Message": {
+          "Message": "Vendor DLQ is not empty. Please investigate."
+        }
+      },
+      "Next": "Product SQS Poll"
+    },
+    "Wait for Vendors": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "Vendor SQS Poll"
+    }
   }
+}
