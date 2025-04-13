@@ -1,14 +1,14 @@
 {
   "Comment": "A description of my state machine",
-  "StartAt": "Pull Vendor List",
-  "QueryLanguage": "JSONata",
+  "StartAt": "Invoke Vendor Lambda",
   "States": {
-    "Pull Vendor List": {
+    "Invoke Vendor Lambda": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Output": "{% $states.result.Payload %}",
       "Arguments": {
-        "FunctionName": "arn:aws:lambda:us-east-2:692859941232:function:cve_ingestion_vendor_lambda:1",
+        "FunctionName": "arn:aws:lambda:us-east-2:692859941232:function:cve_ingestion_vendor_lambda:$LATEST",
         "Payload": "{% $states.input %}"
       },
       "Retry": [
@@ -25,7 +25,26 @@
           "JitterStrategy": "FULL"
         }
       ],
-      "Next": "Initial Wait"
+      "Next": "Initial Wait",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "Vendor Lambda Failed",
+          "Next": "Vendor Lambda Failed"
+        }
+      ]
+    },
+    "Vendor Lambda Failed": {
+      "Type": "Task",
+      "QueryLanguage": "JSONata",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "Message": "Vendor Lambda Failed. Resume the pipeline after fixing: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}"
+      },
+      "Next": "Invoke Vendor Lambda"
     },
     "Initial Wait": {
       "Type": "Wait",
@@ -34,6 +53,7 @@
     },
     "Vendor SQS Poll": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Arguments": {
         "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_sqs",
         "AttributeNames": [
@@ -46,20 +66,23 @@
     },
     "Vendor Queue Check": {
       "Type": "Choice",
+      "QueryLanguage": "JSONata",
       "Choices": [
         {
           "Next": "Vendor DLQ Poll",
-          "Condition": "{% (($states.input.MessagesVisible) = (0) and ($states.input.MessagesNotVisible) = (0)) %}"
+          "Condition": "{% ($states.input.Attributes.ApproximateNumberOfMessages ~> $number = 0 and $states.input.Attributes.ApproximateNumberOfMessagesNotVisible ~> $number = 0) %}"
         }
       ],
       "Default": "Wait for Vendors"
     },
     "Vendor DLQ Poll": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Arguments": {
         "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_sqs_dlq",
         "AttributeNames": [
-          "ApproximateNumberOfMessages"
+          "ApproximateNumberOfMessages",
+          "ApproximateNumberOfMessagesNotVisible"
         ]
       },
       "Resource": "arn:aws:states:::aws-sdk:sqs:getQueueAttributes",
@@ -67,16 +90,18 @@
     },
     "Vendor DLQ Check": {
       "Type": "Choice",
+      "QueryLanguage": "JSONata",
       "Choices": [
         {
           "Next": "Product SQS Poll",
-          "Condition": "{% (($states.input.MessagesVisible) = (0) and ($states.input.MessagesNotVisible) = (0)) %}"
+          "Condition": "{% ($states.input.Attributes.ApproximateNumberOfMessages ~> $number = 0 and $states.input.Attributes.ApproximateNumberOfMessagesNotVisible ~> $number = 0) %}"
         }
       ],
       "Default": "Vendors Not Processed"
     },
     "Product SQS Poll": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Arguments": {
         "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_product_sqs",
         "AttributeNames": [
@@ -84,36 +109,82 @@
           "ApproximateNumberOfMessagesNotVisible"
         ]
       },
-      "Resource": "arn:aws:states:::aws-sdk:sqs:getQueueAttributes.waitForTaskToken",
+      "Resource": "arn:aws:states:::aws-sdk:sqs:getQueueAttributes",
       "Next": "Product Queue Check"
     },
     "Product Queue Check": {
       "Type": "Choice",
+      "QueryLanguage": "JSONata",
       "Choices": [
         {
           "Next": "Product DLQ Poll",
-          "Condition": "{% (($states.input.MessagesVisible) = (0) and ($states.input.MessagesNotVisible) = (0)) %}"
+          "Condition": "{% ($states.input.Attributes.ApproximateNumberOfMessages ~> $number = 0 and $states.input.Attributes.ApproximateNumberOfMessagesNotVisible ~> $number = 0) %}"
         }
       ],
       "Default": "Wait for Products"
     },
     "Product DLQ Poll": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Arguments": {
-        "QueueUrl": "MyData"
+        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_product_sqs_dlq",
+        "AttributeNames": [
+          "ApproximateNumberOfMessages",
+          "ApproximateNumberOfMessagesNotVisible"
+        ]
       },
       "Resource": "arn:aws:states:::aws-sdk:sqs:getQueueAttributes",
       "Next": "Product DLQ Check"
     },
     "Product DLQ Check": {
       "Type": "Choice",
+      "QueryLanguage": "JSONata",
       "Choices": [
         {
-          "Next": "Wait for Firehose",
-          "Condition": "{% (($states.input.MessagesVisible) = (0) and ($states.input.MessagesNotVisible) = (0)) %}"
+          "Next": "Ingestion Lambda Status",
+          "Condition": "{% ($states.input.Attributes.ApproximateNumberOfMessages ~> $number = 0 and $states.input.Attributes.ApproximateNumberOfMessagesNotVisible ~> $number = 0) %}"
         }
       ],
       "Default": "Products Not Processed"
+    },
+    "Ingestion Lambda Status": {
+      "Type": "Task",
+      "QueryLanguage": "JSONPath",
+      "Resource": "arn:aws:states:::aws-sdk:cloudwatch:getMetricStatistics",
+      "Parameters": {
+        "Namespace": "AWS/Lambda",
+        "MetricName": "ConcurrentExecutions",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": "cve_ingestion_firehose_lambda"
+          }
+        ],
+        "StartTime.$": "States.FormatTimestamp(States.MathSubtract(States.TimeNow('unix'), 60), \"yyyy-MM-dd'T'HH:mm:ss'Z'\")",
+        "EndTime.$": "States.FormatTimestamp(States.TimeNow('unix'), \"yyyy-MM-dd'T'HH:mm:ss'Z'\")",
+        "Period": 60,
+        "Statistics": [
+          "Maximum"
+        ]
+      },
+      "ResultPath": "$.CloudWatchOutput",
+      "Next": "Ingestion Lambda Check"
+    },
+    "Ingestion Lambda Check": {
+      "Type": "Choice",
+      "QueryLanguage": "JSONata",
+      "Choices": [
+        {
+          "Next": "Wait for Firehose",
+          "Condition": "{% ($states.input.CloudWatchOutput.Datapoints[0].Maximum ~> $number = 0) %}"
+        }
+      ],
+      "Default": "Wait for Ingestion"
+    },
+    "Wait for Ingestion": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "Ingestion Lambda Status"
     },
     "Wait for Firehose": {
       "Type": "Wait",
@@ -122,6 +193,7 @@
     },
     "Staging Glue Run": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Arguments": {
         "JobName": "cve_staging_glue"
@@ -139,6 +211,7 @@
     },
     "Staging DQ Glue Run": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Arguments": {
         "JobName": "cve_staging_glue_dq"
@@ -156,6 +229,7 @@
     },
     "Production Glue Run": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Arguments": {
         "JobName": "cve_production_glue"
@@ -173,6 +247,7 @@
     },
     "Materialized View Glue Run": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Arguments": {
         "JobName": "cve_production_materialized_views_glue"
@@ -190,6 +265,7 @@
     },
     "Materialized View Glue Run Failed": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
       "Arguments": {
         "Message": "{% $states.input %}",
@@ -199,6 +275,7 @@
     },
     "Production Glue Run Failed": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
       "Arguments": {
         "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
@@ -208,6 +285,7 @@
     },
     "Staging DQ Glue Run Failed": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
       "Arguments": {
         "Message": "{% $states.input %}",
@@ -217,6 +295,7 @@
     },
     "Staging Glue Run Failed": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
       "Arguments": {
         "Message": "{% $states.input %}",
@@ -226,14 +305,13 @@
     },
     "Products Not Processed": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
       "Arguments": {
         "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
-        "Message": {
-          "Message": "Product DLQ is not empty. Please investigate."
-        }
+        "Message": "Product DLQ is not empty. Resume the pipeline after redrive: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}"
       },
-      "Next": "Wait for Firehose"
+      "Next": "Ingestion Lambda Status"
     },
     "Wait for Products": {
       "Type": "Wait",
@@ -242,12 +320,11 @@
     },
     "Vendors Not Processed": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
       "Arguments": {
         "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
-        "Message": {
-          "Message": "Vendor DLQ is not empty. Please investigate."
-        }
+        "Message": "Vendor DLQ is not empty. Resume the pipeline after redrive: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}"
       },
       "Next": "Product SQS Poll"
     },
