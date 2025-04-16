@@ -263,49 +263,11 @@
       "QueryLanguage": "JSONata",
       "Choices": [
         {
-          "Next": "Ingestion Lambda Status",
+          "Next": "Wait for Firehose",
           "Condition": "{% ($states.input.Attributes.ApproximateNumberOfMessages ~> $number = 0 and $states.input.Attributes.ApproximateNumberOfMessagesNotVisible ~> $number = 0) %}"
         }
       ],
       "Default": "Products Not Processed"
-    },
-    "Ingestion Lambda Status": {
-      "Type": "Task",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "StartTime": "{% $fromMillis($millis()-60000, \"yyyy-MM-dd'T'HH:mm:ss'Z'\") %}",
-        "EndTime": "{% $fromMillis($millis(), \"yyyy-MM-dd'T'HH:mm:ss'Z'\") %}",
-        "MetricName": "ConcurrentExecutions",
-        "Namespace": "AWS/Lambda",
-        "Period": 60,
-        "Statistics": [
-          "Maximum"
-        ],
-        "Dimensions": [
-          {
-            "Name": "FunctionName",
-            "Value": "cve_ingestion_firehose_lambda"
-          }
-        ]
-      },
-      "Resource": "arn:aws:states:::aws-sdk:cloudwatch:getMetricStatistics",
-      "Next": "Ingestion Lambda Check"
-    },
-    "Ingestion Lambda Check": {
-      "Type": "Choice",
-      "QueryLanguage": "JSONata",
-      "Choices": [
-        {
-          "Next": "Wait for Firehose",
-          "Condition": "{% ($states.input.CloudWatchOutput.Datapoints[0].Maximum ~> $number = 0) %}"
-        }
-      ],
-      "Default": "Wait for Ingestion"
-    },
-    "Wait for Ingestion": {
-      "Type": "Wait",
-      "Seconds": 10,
-      "Next": "Ingestion Lambda Status"
     },
     "Wait for Firehose": {
       "Type": "Wait",
@@ -377,7 +339,7 @@
         "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
         "Message": "Product DLQ is not empty. Resume the pipeline after redrive: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}"
       },
-      "Next": "Ingestion Lambda Status"
+      "Next": "Wait for Firehose"
     },
     "Wait for Products": {
       "Type": "Wait",
