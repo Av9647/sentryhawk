@@ -1,7 +1,129 @@
 {
-  "Comment": "A description of my state machine",
+  "Comment": "CVE State Machine",
   "StartAt": "Invoke Vendor Lambda",
   "States": {
+    "Ingestion Specs": {
+      "Type": "Pass",
+      "Next": "Druid Ingestion Iterator",
+      "Result": {
+        "files": [
+          "ingestion_spec_lookup.json",
+          "ingestion_spec_ytd_global.json",
+          "ingestion_spec_ytd_vendor.json",
+          "ingestion_spec_ytd_product.json",
+          "ingestion_spec_monthly_global.json",
+          "ingestion_spec_monthly_vendor.json",
+          "ingestion_spec_monthly_product.json",
+          "ingestion_spec_daily_global.json",
+          "ingestion_spec_daily_vendor.json",
+          "ingestion_spec_daily_product.json",
+          "ingestion_spec_daily_global_running.json",
+          "ingestion_spec_daily_vendor_running.json",
+          "ingestion_spec_daily_product_running.json"
+        ]
+      },
+      "ResultPath": "$.IngestionFiles"
+    },
+    "Druid Ingestion Iterator": {
+      "Type": "Map",
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "Invoke Druid Task",
+        "States": {
+          "Invoke Druid Task": {
+            "Type": "Task",
+            "QueryLanguage": "JSONata",
+            "Resource": "arn:aws:states:::aws-sdk:lambda:invoke",
+            "Output": "{% $states.result.Payload %}",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "Next": "Wait for Druid Task",
+            "Arguments": "{% {'FunctionName': 'cve_ingestion_druid_lambda', 'Payload': {'filename': $states.input.filename}} %}"
+          },
+          "Wait for Druid Task": {
+            "Type": "Wait",
+            "Seconds": 20,
+            "Next": "Invoke Druid Task Poll",
+            "QueryLanguage": "JSONata"
+          },
+          "Invoke Druid Task Poll": {
+            "Type": "Task",
+            "QueryLanguage": "JSONata",
+            "Resource": "arn:aws:states:::aws-sdk:lambda:invoke",
+            "Arguments": "{% { 'FunctionName': 'cve_ingestion_druid_polling_lambda', 'Payload': $states.input } %}",
+            "Output": "{% $states.result.Payload %}",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "Next": "Druid Task Status"
+          },
+          "Druid Task Status": {
+            "Type": "Choice",
+            "Default": "Wait for Druid Task",
+            "Choices": [
+              {
+                "Next": "Druid Task Successful",
+                "Condition": "{% $contains($states.input, \"\\\"status\\\": \\\"SUCCESS\\\", \\\"full_status\\\"\") %}"
+              },
+              {
+                "Next": "Druid Task Failed",
+                "Condition": "{% $contains($states.input, \"\\\"status\\\": \\\"FAILED\\\", \\\"full_status\\\"\") %}"
+              },
+              {
+                "Next": "Druid Task Failed",
+                "Condition": "{% $contains($states.input, \"\\\"errorMessage\\\"\") %}"
+              }
+            ],
+            "QueryLanguage": "JSONata"
+          },
+          "Druid Task Failed": {
+            "Type": "Task",
+            "QueryLanguage": "JSONata",
+            "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+            "Arguments": {
+              "Message": "{% $states.input %}",
+              "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
+            },
+            "Next": "Invoke Druid Task"
+          },
+          "Druid Task Successful": {
+            "Type": "Succeed",
+            "QueryLanguage": "JSONata"
+          }
+        }
+      },
+      "MaxConcurrency": 1,
+      "ItemsPath": "$.IngestionFiles.files",
+      "End": true,
+      "ItemSelector": {
+        "filename.$": "$$.Map.Item.Value"
+      }
+    },
     "Invoke Vendor Lambda": {
       "Type": "Task",
       "QueryLanguage": "JSONata",
@@ -149,25 +271,24 @@
     },
     "Ingestion Lambda Status": {
       "Type": "Task",
-      "QueryLanguage": "JSONPath",
-      "Resource": "arn:aws:states:::aws-sdk:cloudwatch:getMetricStatistics",
-      "Parameters": {
-        "Namespace": "AWS/Lambda",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "StartTime": "{% $fromMillis($millis()-60000, \"yyyy-MM-dd'T'HH:mm:ss'Z'\") %}",
+        "EndTime": "{% $fromMillis($millis(), \"yyyy-MM-dd'T'HH:mm:ss'Z'\") %}",
         "MetricName": "ConcurrentExecutions",
+        "Namespace": "AWS/Lambda",
+        "Period": 60,
+        "Statistics": [
+          "Maximum"
+        ],
         "Dimensions": [
           {
             "Name": "FunctionName",
             "Value": "cve_ingestion_firehose_lambda"
           }
-        ],
-        "StartTime.$": "States.FormatTimestamp(States.MathSubtract(States.TimeNow('unix'), 60), \"yyyy-MM-dd'T'HH:mm:ss'Z'\")",
-        "EndTime.$": "States.FormatTimestamp(States.TimeNow('unix'), \"yyyy-MM-dd'T'HH:mm:ss'Z'\")",
-        "Period": 60,
-        "Statistics": [
-          "Maximum"
         ]
       },
-      "ResultPath": "$.CloudWatchOutput",
+      "Resource": "arn:aws:states:::aws-sdk:cloudwatch:getMetricStatistics",
       "Next": "Ingestion Lambda Check"
     },
     "Ingestion Lambda Check": {
@@ -189,119 +310,64 @@
     "Wait for Firehose": {
       "Type": "Wait",
       "Seconds": 910,
-      "Next": "Staging Glue Run"
+      "Next": "Glue Jobs"
     },
-    "Staging Glue Run": {
-      "Type": "Task",
-      "QueryLanguage": "JSONata",
-      "Resource": "arn:aws:states:::glue:startJobRun.sync",
-      "Arguments": {
-        "JobName": "cve_staging_glue"
+    "Glue Jobs": {
+      "Type": "Pass",
+      "Next": "Glue Job Iterator",
+      "Result": {
+        "jobs": [
+          "cve_staging_glue",
+          "cve_staging_glue_dq",
+          "cve_production_glue",
+          "cve_production_materialized_views_glue"
+        ]
       },
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Comment": "Staging Run Failed",
-          "Next": "Staging Glue Run Failed"
+      "ResultPath": "$.GlueJobs"
+    },
+    "Glue Job Iterator": {
+      "Type": "Map",
+      "ItemsPath": "$.GlueJobs.jobs",
+      "MaxConcurrency": 1,
+      "ItemSelector": {
+        "jobname.$": "$$.Map.Item.Value"
+      },
+      "Iterator": {
+        "StartAt": "Glue Job",
+        "States": {
+          "Glue Job": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::glue:startJobRun.sync",
+            "Parameters": {
+              "JobName.$": "$.jobname"
+            },
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Comment": "Glue Job Failed",
+                "Next": "Glue Job Failed"
+              }
+            ],
+            "Next": "Glue Job Successful"
+          },
+          "Glue Job Failed": {
+            "Type": "Task",
+            "QueryLanguage": "JSONata",
+            "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+            "Arguments": {
+              "Message": "{% $states.input %}",
+              "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
+            },
+            "Next": "Glue Job"
+          },
+          "Glue Job Successful": {
+            "Type": "Succeed"
+          }
         }
-      ],
-      "Next": "Staging DQ Glue Run"
-    },
-    "Staging DQ Glue Run": {
-      "Type": "Task",
-      "QueryLanguage": "JSONata",
-      "Resource": "arn:aws:states:::glue:startJobRun.sync",
-      "Arguments": {
-        "JobName": "cve_staging_glue_dq"
       },
-      "Next": "Production Glue Run",
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Comment": "Staging DQ Glue Run Failed",
-          "Next": "Staging DQ Glue Run Failed"
-        }
-      ]
-    },
-    "Production Glue Run": {
-      "Type": "Task",
-      "QueryLanguage": "JSONata",
-      "Resource": "arn:aws:states:::glue:startJobRun.sync",
-      "Arguments": {
-        "JobName": "cve_production_glue"
-      },
-      "Next": "Materialized View Glue Run",
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Comment": "Production Glue Run Failed",
-          "Next": "Production Glue Run Failed"
-        }
-      ]
-    },
-    "Materialized View Glue Run": {
-      "Type": "Task",
-      "QueryLanguage": "JSONata",
-      "Resource": "arn:aws:states:::glue:startJobRun.sync",
-      "Arguments": {
-        "JobName": "cve_production_materialized_views_glue"
-      },
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Comment": "Materialized View Glue Run Failed",
-          "Next": "Materialized View Glue Run Failed"
-        }
-      ],
-      "End": true
-    },
-    "Materialized View Glue Run Failed": {
-      "Type": "Task",
-      "QueryLanguage": "JSONata",
-      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
-      "Arguments": {
-        "Message": "{% $states.input %}",
-        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
-      },
-      "Next": "Materialized View Glue Run"
-    },
-    "Production Glue Run Failed": {
-      "Type": "Task",
-      "QueryLanguage": "JSONata",
-      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
-      "Arguments": {
-        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
-        "Message": "{% $states.input %}"
-      },
-      "Next": "Production Glue Run"
-    },
-    "Staging DQ Glue Run Failed": {
-      "Type": "Task",
-      "QueryLanguage": "JSONata",
-      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
-      "Arguments": {
-        "Message": "{% $states.input %}",
-        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
-      },
-      "Next": "Staging DQ Glue Run"
-    },
-    "Staging Glue Run Failed": {
-      "Type": "Task",
-      "QueryLanguage": "JSONata",
-      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
-      "Arguments": {
-        "Message": "{% $states.input %}",
-        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
-      },
-      "Next": "Staging Glue Run"
+      "Next": "Ingestion Specs"
     },
     "Products Not Processed": {
       "Type": "Task",
