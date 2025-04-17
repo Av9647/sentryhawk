@@ -106,7 +106,7 @@
             "QueryLanguage": "JSONata",
             "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
             "Arguments": {
-              "Message": "{% $states.input %}",
+              "Message": "{% $states.input & '\n\nDruid task failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}",
               "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
             },
             "Next": "Invoke Druid Task"
@@ -319,7 +319,7 @@
             "QueryLanguage": "JSONata",
             "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
             "Arguments": {
-              "Message": "{% $states.input %}",
+              "Message": "{% $states.input & '\n\nGlue job failed. Resume the pipeline after fixing job: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}",
               "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
             },
             "Next": "Glue Job"
