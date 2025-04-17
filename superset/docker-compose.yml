@@ -1,0 +1,102 @@
+
+# -----------------------------------------------------------------------
+# Shared volume mounts for all Superset containers
+# -----------------------------------------------------------------------
+x-superset-volumes: &superset-volumes
+  # 1) Init & bootstrap scripts
+  - ./docker:/app/docker:ro
+  # 2a) Python‑path lookup for your custom config
+  - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+  # 2b) /etc/superset lookup for your custom config
+  - ./superset_config.py:/etc/superset/superset_config.py:ro
+  # 3) Persist Superset home (metadata, cache, logs)
+  - superset_home:/app/superset_home
+
+services:
+  # ---------------------------------------------------------------------
+  # Redis: rate‑limit store, cache backend, Celery broker & result backend
+  # ---------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: superset_cache
+    restart: unless-stopped
+    volumes:
+      - redis:/data                   # Persist Redis data
+
+  # ---------------------------------------------------------------------
+  # One‑time init: DB migrations, admin user creation, sample data
+  # ---------------------------------------------------------------------
+  superset-init:
+    image: apache/superset:latest
+    container_name: superset_init
+    command: ["/app/docker/docker-init.sh"]  
+    env_file:
+      - .env                             # Loads DB creds, ADMIN_*, SECRET_KEY, etc.
+    environment:
+      - SUPERSET_CONFIG_PATH=/etc/superset/superset_config.py
+    depends_on:
+      - redis
+    restart: "no"
+    volumes: *superset-volumes
+
+  # ---------------------------------------------------------------------
+  # Superset web server (Gunicorn)
+  # ---------------------------------------------------------------------
+  superset:
+    image: apache/superset:latest
+    container_name: superset_app
+    command: ["/app/docker/docker-bootstrap.sh", "app-gunicorn"]
+    env_file:
+      - .env
+    environment:
+      - SUPERSET_CONFIG_PATH=/etc/superset/superset_config.py
+    ports:
+      - "8088:8088"                      # Expose Superset UI
+    depends_on:
+      - redis
+      - superset-init
+    restart: unless-stopped
+    volumes: *superset-volumes
+
+  # ---------------------------------------------------------------------
+  # Celery worker (asynchronous query execution)
+  # ---------------------------------------------------------------------
+  superset-worker:
+    image: apache/superset:latest
+    container_name: superset_worker
+    command: ["/app/docker/docker-bootstrap.sh", "worker"]
+    env_file:
+      - .env
+    environment:
+      - SUPERSET_CONFIG_PATH=/etc/superset/superset_config.py
+      - CELERY_BROKER_URL=redis://superset_cache:6379/2
+      - CELERY_RESULT_BACKEND=redis://superset_cache:6379/3
+    depends_on:
+      - superset-init
+    restart: unless-stopped
+    volumes: *superset-volumes
+
+  # ---------------------------------------------------------------------
+  # Celery beat (scheduled jobs: alerts, reports, etc.)
+  # ---------------------------------------------------------------------
+  superset-worker-beat:
+    image: apache/superset:latest
+    container_name: superset_worker_beat
+    command: ["/app/docker/docker-bootstrap.sh", "beat"]
+    env_file:
+      - .env
+    environment:
+      - SUPERSET_CONFIG_PATH=/etc/superset/superset_config.py
+      - CELERY_BROKER_URL=redis://superset_cache:6379/2
+      - CELERY_RESULT_BACKEND=redis://superset_cache:6379/3
+    depends_on:
+      - superset-init
+    restart: unless-stopped
+    volumes: *superset-volumes
+
+# -----------------------------------------------------------------------
+# Named volumes (persistent storage)
+# -----------------------------------------------------------------------
+volumes:
+  superset_home:  # Superset metadata, cache, logs
+  redis:          # Redis data

@@ -1,0 +1,5 @@
+# docker/requirements-local.txt
+psycopg2-binary
+pyathena[pandas]
+PyAthenaJDBC
+pydruid
