@@ -54,3 +54,28 @@ SESSION_TYPE = "redis"
 SESSION_REDIS = redis.StrictRedis(
     host="superset_cache", port=6379, db=4, decode_responses=True
 )
+
+# ---------------------------------------------------------------------
+# Enable Anonymous Access in Superset
+# ---------------------------------------------------------------------
+PUBLIC_ROLE_LIKE = "Gamma"
+
+# ---------------------------------------------------------------------
+# Enable fine‑grained dashboard sharing
+# ---------------------------------------------------------------------
+FEATURE_FLAGS = {
+  "DASHBOARD_RBAC": True,       # if you want per‑dashboard grant checkboxes
+  "ALERT_REPORTS": True,        # for the Alerts & Reports UI
+  "DRILL_BY": True,             # so drill menus appear
+  "DRILL_TO_DETAIL": True,      # if you’re doing detail‑page drill‑throughs
+}
+
+# ---------------------------------------------------------------------
+# Ensures Correct URL redirects and logging
+# ---------------------------------------------------------------------
+ENABLE_PROXY_FIX = True
+
+# ---------------------------------------------------------------------
+# For email reports or thumbnails to use correct external URL
+# ---------------------------------------------------------------------
+WEBDRIVER_BASEURL = "https://www.cveintel.org"
