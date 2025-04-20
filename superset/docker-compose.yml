@@ -29,7 +29,23 @@ services:
   superset-init:
     image: apache/superset:latest
     container_name: superset_init
-    command: ["/app/docker/docker-init.sh"]  
+    command: >
+      bash -c "
+        if [ ! -f /app/superset_home/.initialized ]; then
+          echo 'Running one-time Superset setup...' &&
+          superset db upgrade &&
+          superset fab create-admin \
+            --username ${ADMIN_USERNAME} \
+            --firstname ${ADMIN_FIRSTNAME} \
+            --lastname ${ADMIN_LASTNAME} \
+            --email ${ADMIN_EMAIL} \
+            --password ${ADMIN_PASSWORD} &&
+          superset init &&
+          touch /app/superset_home/.initialized;
+        else
+          echo 'Superset already initialized. Skipping setup.';
+        fi
+      "
     env_file:
       - .env                             # Loads DB creds, ADMIN_*, SECRET_KEY, etc.
     environment:
