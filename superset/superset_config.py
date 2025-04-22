@@ -64,6 +64,7 @@ PUBLIC_ROLE_LIKE = "Gamma"
 # Enable fine‑grained dashboard sharing
 # ---------------------------------------------------------------------
 FEATURE_FLAGS = {
+  "EMBEDDED_SUPERSET": True,    # Enable the embedded‑mode
   "DASHBOARD_RBAC": True,       # if you want per‑dashboard grant checkboxes
   "ALERT_REPORTS": True,        # for the Alerts & Reports UI
   "DRILL_BY": True,             # so drill menus appear
@@ -79,3 +80,15 @@ ENABLE_PROXY_FIX = True
 # For email reports or thumbnails to use correct external URL
 # ---------------------------------------------------------------------
 WEBDRIVER_BASEURL = "https://www.cveintel.org"
+
+# ---------------------------------------------------------------------
+# Override Superset’s default headers to allow framing:
+#   - X‑Frame‑Options = ALLOWALL
+#   - frame‑ancestors include your domain
+# ---------------------------------------------------------------------
+HTTP_HEADERS = {
+    "X-Frame-Options": "ALLOWALL",
+    "Content-Security-Policy": "frame-ancestors 'self' https://www.cveintel.org; " 
+                              "default-src 'self'; img-src 'self' data:; " 
+                              "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+}
