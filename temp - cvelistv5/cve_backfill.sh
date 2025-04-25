@@ -1,8 +1,14 @@
 #!/bin/bash
-# cve_yearly_backfill.sh — import every yearly NVD JSON feed, then run community-list updater
-# with single-process lock, gzip support, mkdir /data, and unified db_updater call
+# orchestrate full historical backfill: cvelistv5 → NVD → community feeds
+set -euo pipefail
 
-LOCKFILE="/tmp/cve_yearly_backfill.lock"
+# 1) Import official CVE List V5 & rebuild mappings
+echo "[1] Importing cvelistv5 and building mappings"
+docker compose run --rm cvelist_importer
+
+# 2) Full NVD backfill (1999 → today)
+echo "[2] Full NVD backfill (1999 → today)"
+LOCKFILE="/tmp/cve_backfill.lock"
 if [ -e "$LOCKFILE" ]; then
   echo "[ERROR] Lockfile exists. Another backfill is running or crashed."
   echo "        Remove $LOCKFILE if you're sure it's stale, then retry."
@@ -57,10 +63,8 @@ done
 echo "[INFO] Cleaning up local JSON files..."
 rm -rf "$WORKDIR"
 
-echo "[INFO] Pulling community-enrichment lists (cvelistv5, variot, exploitdb)..."
-docker exec "$API_CONTAINER" \
-  python3 /app/sbin/db_updater.py \
-    -s cvelistv5 variot exploitdb \
-    -f
+# 3) Pull community-driven enrichment
+echo "[3] Pulling community enrichment feeds"
+docker exec "$API_CONTAINER" python3 /app/sbin/db_updater.py -s cwe capec via4 epss -f
 
-echo "[DONE] Full historical backfill complete!"
+echo "[DONE] Full backfill complete"
