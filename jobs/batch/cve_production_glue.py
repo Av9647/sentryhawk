@@ -136,33 +136,37 @@ LOCATION '{PROD_PATH}{PROD_TABLE}'
 log(f"Production table {PROD_TABLE} is ready (created if not exists).")
 
 # Step 5: Merge incremental changes into production table (SCD Type 2 logic)
-# 5a. Expire any existing current records that are updated by new data
+# Step 5a: Expire old “current” rows only when source.lastModified is non-null
 spark.sql(f"""
 MERGE INTO glue_catalog.{DATABASE}.{PROD_TABLE} AS target
 USING new_data AS source
-ON target.cveId = source.cveId 
-   AND target.vendor = source.vendor 
-   AND target.product = source.product 
-   AND target.currentFlag = true
-WHEN MATCHED AND target.lastModified < source.lastModified
-THEN UPDATE SET 
-    target.validTo = source.validFrom, 
-    target.currentFlag = false
+  ON target.cveId      = source.cveId
+ AND target.vendor     = source.vendor
+ AND target.product    = source.product
+ AND target.currentFlag = true
+WHEN MATCHED AND (
+     source.lastModified IS NOT NULL
+  AND (target.lastModified IS NULL
+       OR target.lastModified < source.lastModified)
+)
+THEN UPDATE SET
+     target.validTo      = source.validFrom,
+     target.currentFlag = false
 """)
-log("Existing records updated (expired) where CVE data changed.")
+log("Expired old records where CVE data changed.")
 
-# 5b. Insert new current records (new CVEs or updates) 
+# Step 5b: Insert new rows (new CVEs or updated CVEs)
 spark.sql(f"""
 MERGE INTO glue_catalog.{DATABASE}.{PROD_TABLE} AS target
 USING new_data AS source
-ON target.cveId = source.cveId 
-   AND target.vendor = source.vendor 
-   AND target.product = source.product 
-   AND target.currentFlag = true
-WHEN NOT MATCHED 
+  ON target.cveId      = source.cveId
+ AND target.vendor     = source.vendor
+ AND target.product    = source.product
+ AND target.currentFlag = true
+WHEN NOT MATCHED
 THEN INSERT *
 """)
-log("New records inserted (including new CVEs and new versions of updated CVEs).")
+log("Inserted new current records (new or updated CVEs).")
 
 # Step 6: Logging the execution details to S3
 try:
