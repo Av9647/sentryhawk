@@ -213,17 +213,26 @@ def lambda_handler(event, context):
             log_message("Message missing vendor or product.")
             continue
         
+        # pick up incoming timestamp or fall back
+        ts_in = body.get("ingestionTimestamp")
+        if ts_in:
+            ingestion_ts = ts_in
+        else:
+            ingestion_ts = datetime.now(timezone.utc).isoformat()
+        # derive YYYY-MM-DD
+        ingestion_date = ingestion_ts[:10]
+
         # Fetch CVE data
         data = fetch_cve_data(vendor, product)
         
         # Build the complete record with ingestion metadata.
         record = {
-            "vendor": vendor,
-            "product": product,
-            "cvelistv5": data.get("cvelistv5", []),
-            "fkie_nvd": data.get("fkie_nvd", []),
-            "ingestionTimestamp": datetime.now(timezone.utc).isoformat(),
-            "ingestionDate": datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            "vendor":             vendor,
+            "product":            product,
+            "cvelistv5":          data.get("cvelistv5", []),
+            "fkie_nvd":           data.get("fkie_nvd", []),
+            "ingestionTimestamp": ingestion_ts,
+            "ingestionDate":      ingestion_date
         }
         
         # Split the record so that each chunk is under MAX_RECORD_SIZE.

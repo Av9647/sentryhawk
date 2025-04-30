@@ -1,11 +1,11 @@
 import os
-import boto3
 import json
+import boto3
 import requests
 from datetime import datetime, timezone
 import urllib.parse  # In case vendor names need URL encoding in future use cases
 
-# Initialize SQS client outside handler for re-use (will be reused across invocations if AWS keeps the container warm)
+# Initialize SQS client outside handler for re-use (kept warm by AWS if possible)
 sqs = boto3.client('sqs')
 VENDOR_QUEUE_URL = os.environ['VENDOR_QUEUE_URL']  # SQS queue URL from environment
 
@@ -23,12 +23,8 @@ def fetch_vendor_list():
         log_message(f"DEBUG: Response text (truncated): {response.text[:500]}")
         if response.status_code == 200:
             data = response.json()
-            # If data is a list, use it directly; otherwise, assume it's a dict with key 'vendor'
-            if isinstance(data, list):
-                vendors = data
-            else:
-                vendors = data.get("vendor", [])
-            return vendors
+            # If data is a list, use it directly; otherwise assume dict with key 'vendor'
+            return data if isinstance(data, list) else data.get("vendor", [])
         else:
             log_message(f"DEBUG: Non-200 status code received: {response.status_code}")
             return []
@@ -46,25 +42,35 @@ def lambda_handler(event, context):
         return {"status": "NO_VENDORS"}
     
     log_message(f"Retrieved {len(vendors)} vendors. Enqueuing to SQS...")
+
+    # Generate a single ingestion timestamp for this batch
+    ingestion_ts = datetime.now(timezone.utc).isoformat()
     
     batch_size = 10
     total_sent = 0
+
+    # Enqueue in batches of up to 10
     for i in range(0, len(vendors), batch_size):
         batch = vendors[i:i+batch_size]
         entries = []
         for idx, vendor in enumerate(batch):
+            payload = {
+                "vendor": vendor,
+                "ingestionTimestamp": ingestion_ts
+            }
             entries.append({
                 'Id': str(idx),
-                'MessageBody': vendor  # Using vendor name as the message body
+                'MessageBody': json.dumps(payload)
             })
         try:
             response = sqs.send_message_batch(QueueUrl=VENDOR_QUEUE_URL, Entries=entries)
-            # Log any failed messages in the batch
-            if 'Failed' in response and response['Failed']:
-                for f in response['Failed']:
-                    failed_vendor = batch[int(f['Id'])] if f.get('Id') and f['Id'].isdigit() else "Unknown"
+            failed = response.get('Failed', [])
+            if failed:
+                for f in failed:
+                    failed_idx = int(f['Id'])
+                    failed_vendor = batch[failed_idx] if failed_idx < len(batch) else "Unknown"
                     log_message(f"Failed to enqueue vendor {failed_vendor}: {f['Message']}")
-            total_sent += len(batch) - len(response.get('Failed', []))
+            total_sent += len(entries) - len(failed)
         except Exception as e:
             log_message(f"Exception sending message batch for vendors {batch}: {e}")
     
