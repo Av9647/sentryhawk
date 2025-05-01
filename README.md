@@ -1,4 +1,22 @@
-# Real-time Cyber Threat Intel Platform
+# Sentryhawk — Real-time Cyber-Threat-Intel Platform
+
+<p align="center">
+  <a href="https://www.sentryhawk.org">
+    <img src="https://img.shields.io/badge/status-WIP-orange" alt="Project Status">
+  </a>
+  <a href="./LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License">
+  </a>
+</p>
+
+> **Sentryhawk** aggregates and enriches public threat-intelligence feeds,  
+> computes a cumulative exposure score and surfaces the results in interactive dashboards.
+
+---
+
+## License  
+Sentryhawk is open-source software released under the [Apache&nbsp;License 2.0](./LICENSE).  
+© 2025 [Athul Vinod](https://www.sentryhawk.org)
 
 ## Overview
 This project is a data engineering solution designed to aggregate and analyze cybersecurity threat data from multiple public APIs. 
@@ -57,3 +75,9 @@ Real-time JSON Dumps: https://vulnerability.circl.lu/dumps/
 - Integration of real-time data streaming.
 - Expansion to additional threat intelligence sources.
 - Deployment of load balancer and autoscaling if user base grows.
+
+---
+
+## Disclaimer  
+*Sentryhawk is an independent open-source project and is not affiliated with, endorsed by,  
+or associated with any commercial entity of the same or similar name, if one exists.*
