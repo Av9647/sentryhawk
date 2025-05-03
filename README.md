@@ -6,9 +6,7 @@
 <hr>
 
 ## Overview
-Sentryhawk is a cloud-native platform that aggregates and analyzes cybersecurity threat data from multiple public APIs.  
-By computing a cumulative threat-exposure metric, the system provides actionable insights into the evolving risk landscape,  
-aiding security teams in proactive threat management.
+The project is a cloud-native platform that aggregates and analyzes cybersecurity threat data from multiple public APIs. By computing a cumulative threat-exposure metric, the system provides actionable insights into the evolving risk landscape, aiding security teams in proactive threat management.
 
 ## Objectives
 - **Data Ingestion:** Daily extraction of threat data (e.g., vulnerabilities, exposed assets) from APIs like CIRCL CVE Search and VirusTotal.  

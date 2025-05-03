@@ -154,10 +154,10 @@ fkie_schema = StructType([
 ])
 
 ndjson_schema = StructType([
+    StructField("ingestionDate", StringType(), True),
+    StructField("ingestionTimestamp", StringType(), True),
     StructField("vendor", StringType(), True),
     StructField("product", StringType(), True),
-    StructField("ingestionTimestamp", StringType(), True),
-    StructField("ingestionDate", StringType(), True),
     StructField("cvelistv5", ArrayType(ArrayType(StringType())), True),
     StructField("fkie_nvd", ArrayType(ArrayType(StringType())), True)
 ])

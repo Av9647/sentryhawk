@@ -39,7 +39,7 @@ def fetch_cve_data(vendor, product):
     encoded_product = urllib.parse.quote(product)
     url = f"https://cve.circl.lu/api/search/{encoded_vendor}/{encoded_product}"
     try:
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=180)
         log_message(f"Fetched CVE data for {vendor}-{product} (status {response.status_code})")
         if response.status_code == 200:
             data = response.json()
@@ -225,14 +225,15 @@ def lambda_handler(event, context):
         # Fetch CVE data
         data = fetch_cve_data(vendor, product)
         
-        # Build the complete record with ingestion metadata.
+        # Build the complete record with ingestion metadata. 
+        # Ensure ingestionDate is the first key for firehose record.
         record = {
+            "ingestionDate":      ingestion_date,
+            "ingestionTimestamp": ingestion_ts,
             "vendor":             vendor,
             "product":            product,
             "cvelistv5":          data.get("cvelistv5", []),
-            "fkie_nvd":           data.get("fkie_nvd", []),
-            "ingestionTimestamp": ingestion_ts,
-            "ingestionDate":      ingestion_date
+            "fkie_nvd":           data.get("fkie_nvd", [])
         }
         
         # Split the record so that each chunk is under MAX_RECORD_SIZE.
