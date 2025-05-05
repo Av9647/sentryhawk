@@ -1,4 +1,3 @@
-import os
 import json
 import gzip
 import uuid
@@ -6,33 +5,43 @@ import requests
 import urllib.parse
 from datetime import datetime, timezone
 import boto3
+import re
 
 # S3 client; bucket is fixed per requirement
 s3     = boto3.client("s3")
-BUCKET = "cve-ingestion"  
+BUCKET = "cve-ingestion"
 
 def log_message(msg: str):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     print(f"{ts} - {msg}")
 
 def fetch_cve_data(vendor: str, product: str) -> dict:
+    # URL‑encode for the HTTP call, unchanged
     url = (
         "https://cve.circl.lu/api/search/"
         f"{urllib.parse.quote(vendor)}/{urllib.parse.quote(product)}"
     )
-    try:
-        resp = requests.get(url, timeout=120)
-    except Exception as e:
-        log_message(f"ERROR fetching {vendor}-{product}: {e}")
-        raise
+    resp = requests.get(url, timeout=120)
     log_message(f"Fetched {vendor}-{product}, status {resp.status_code}")
     if resp.status_code != 200:
-        raise RuntimeError(f"CVE API for {vendor}-{product} returned {resp.status_code}")
+        raise RuntimeError(f"CVE API returned {resp.status_code} for {vendor}-{product}")
     data = resp.json()
     return {
         "cvelistv5": data.get("cvelistv5", []),
         "fkie_nvd":  data.get("fkie_nvd", [])
     }
+
+def sanitize_name(name: str) -> str:
+    """
+    1) Replace any character NOT in [A-Za-z0-9._-] with underscore.
+    2) Strip any leading dots / dashes / underscores so Spark will see the files.
+    3) If the result is empty, fall back to an alphanumeric name.
+    """
+    safe = re.sub(r"[^A-Za-z0-9\._\-]", "_", name)
+    safe = re.sub(r"^[\._\-]+", "", safe)
+    if not safe:
+        safe = "file"     # or "x", or any [A-Za-z0-9]-leading token
+    return safe
 
 def lambda_handler(event, context):
     records = event.get("Records", [])
@@ -72,14 +81,15 @@ def lambda_handler(event, context):
         raw = (json.dumps(record) + "\n").encode("utf-8")
         gz  = gzip.compress(raw)
 
-        # 6) Safely encode vendor/product for filenames
-        safe_vendor  = urllib.parse.quote(vendor,  safe='')
-        safe_product = urllib.parse.quote(product, safe='')
+        # 6) Sanitize vendor/product for S3 folder & filename
+        sanitized_vendor  = sanitize_name(vendor)
+        sanitized_product = sanitize_name(product)
 
-        # 7) Write to S3 under cve_json/{ingestionDate}/
+        # 7) Write to S3 under cve_json/{ingestionDate}/{sanitized_vendor}/
         key = (
-            f"cve_json/{ingestion_date}/{safe_vendor}/"
-            f"{safe_vendor}_{safe_product}_{ingestion_date}_{uuid.uuid4()}.json.gz"
+            f"cve_json/{ingestion_date}/{sanitized_vendor}/"
+            f"{sanitized_vendor}_{sanitized_product}_"
+            f"{ingestion_date}_{uuid.uuid4()}.json.gz"
         )
         log_message(f"Writing {vendor}-{product} → s3://{BUCKET}/{key}")
         s3.put_object(
