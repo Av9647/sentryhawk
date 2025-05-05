@@ -1,75 +1,84 @@
 import sys
-import math
 import uuid
-import boto3
-from awsglue.utils import getResolvedOptions
+import time
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
+import boto3
 
-# 1) Fetch job args
-args = getResolvedOptions(sys.argv, ["JOB_NAME", "INGESTION_DATE"])
-ingestion_date = args["INGESTION_DATE"]  # e.g. "2025-05-02"
+# 1) Hard‑coded ingestion date (or fetch via getResolvedOptions if you prefer)
+ingestion_date = "2025-05-03"
 
-# 2) Initialize Glue/Spark
+# 2) Spark + Glue setup
 sc = SparkContext.getOrCreate()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 
-# 3) S3 locations
-bucket             = "cve-ingestion"
-input_prefix       = f"cve_json/{ingestion_date}/"
-temp_output_prefix = f"cve_batch/{ingestion_date}/_temp/"
-final_prefix       = f"cve_batch/{ingestion_date}/"
-
+# 3) S3 client & paths
 s3 = boto3.client("s3")
+bucket = "cve-ingestion"
+input_prefix = f"cve_json/{ingestion_date}/"
+temp_prefix  = f"cve_batch/{ingestion_date}/_temp/"
+final_prefix = f"cve_batch/{ingestion_date}/"
 
-# 4) Sum total bytes under the input prefix (includes all vendor sub‑folders)
-paginator = s3.get_paginator("list_objects_v2")
+# 4) Count files & bytes
+p = s3.get_paginator("list_objects_v2")
 total_bytes = 0
-for page in paginator.paginate(Bucket=bucket, Prefix=input_prefix):
-    for obj in page.get("Contents", []):
-        total_bytes += obj["Size"]
+file_count  = 0
+for pg in p.paginate(Bucket=bucket, Prefix=input_prefix):
+    for o in pg.get("Contents", []):
+        total_bytes += o["Size"]
+        file_count  += 1
 
-# 5) Determine number of 1 GiB partitions
-ONE_GIB = 1024**3
-num_partitions = max(1, math.ceil(total_bytes / ONE_GIB))
-print(f"Total bytes = {total_bytes:,}, using {num_partitions} partition(s).")
+if file_count == 0:
+    print("No files to process, exiting.")
+    sys.exit(0)
 
-# 6) Read *all* gzipped JSON lines under every vendor folder
-#    Use recursiveFileLookup so we pick up deeper sub‑paths
-input_path = f"s3://{bucket}/{input_prefix}"
+print(f"Found {file_count} files, {total_bytes/1024**3:.1f} GiB")
+
+# 5) Decide partitions
+MAX_SHARDS = 10
+num_parts = file_count if file_count < MAX_SHARDS else MAX_SHARDS
+print(f"Repartitioning into {num_parts} partitions")
+
+# 6) Read all lines (raw text) recursively
 df = (spark.read
-       .option("recursiveFileLookup", "true")
-       .text(input_path)
-    )
+           .option("recursiveFileLookup", "true")
+           .text(f"s3://{bucket}/{input_prefix}"))
 
-# 7) Repartition to approximately 1 GiB chunks and write to temp
-df_repart = df.repartition(num_partitions)
-temp_path  = f"s3://{bucket}/{temp_output_prefix}"
-(df_repart.write
+# 7) Repartition & write gzipped NDJSON to temp
+df2 = df.repartition(num_parts)
+temp_path = f"s3://{bucket}/{temp_prefix}"
+(df2.write
     .mode("overwrite")
     .option("compression", "gzip")
     .text(temp_path)
 )
+print(f"Wrote temp shards to {temp_path}")
 
-# 8) Rename part‑files to {date}_{UUID}.json.gz under final_prefix
-paginator = s3.get_paginator("list_objects_v2")
-for page in paginator.paginate(Bucket=bucket, Prefix=temp_output_prefix):
-    for obj in page.get("Contents", []):
-        key = obj["Key"]
+# 8) Give S3 a moment
+time.sleep(5)
+
+# 9) Atomically copy & rename into final with UUIDs
+for pg in p.paginate(Bucket=bucket, Prefix=temp_prefix):
+    for o in pg.get("Contents", []):
+        key = o["Key"]
         if not key.lower().endswith(".gz"):
             continue
         new_key = f"{final_prefix}{ingestion_date}_{uuid.uuid4()}.json.gz"
-        s3.copy_object(
-            Bucket=bucket,
-            CopySource={"Bucket": bucket, "Key": key},
-            Key=new_key
-        )
-        s3.delete_object(Bucket=bucket, Key=key)
+        try:
+            s3.copy_object(
+                Bucket=bucket,
+                CopySource={"Bucket":bucket, "Key":key},
+                Key=new_key
+            )
+            s3.delete_object(Bucket=bucket, Key=key)
+            print(f"Moved {key} → {new_key}")
+        except Exception as e:
+            print(f"Error moving {key}: {e}")
 
-# 9) Clean up any leftovers in the temp folder
-for page in paginator.paginate(Bucket=bucket, Prefix=temp_output_prefix):
-    for obj in page.get("Contents", []):
-        s3.delete_object(Bucket=bucket, Key=obj["Key"])
+# 10) Clean up any leftovers
+for pg in p.paginate(Bucket=bucket, Prefix=temp_prefix):
+    for o in pg.get("Contents", []):
+        s3.delete_object(Bucket=bucket, Key=o["Key"])
 
-print("Batch compaction complete.")
+print("Compaction complete.")
