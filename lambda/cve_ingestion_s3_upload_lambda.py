@@ -79,24 +79,22 @@ def lambda_handler(event, context):
 
         # 5) Serialize + gzip
         raw = (json.dumps(record) + "\n").encode("utf-8")
-        gz  = gzip.compress(raw)
 
         # 6) Sanitize vendor/product for S3 folder & filename
         sanitized_vendor  = sanitize_name(vendor)
         sanitized_product = sanitize_name(product)
 
-        # 7) Write to S3 under cve_json/{ingestionDate}/{sanitized_vendor}/
+        # 7) Write uncompressed JSON to S3 under cve_json/{ingestionDate}/{sanitized_vendor}/
         key = (
             f"cve_json/{ingestion_date}/{sanitized_vendor}/"
             f"{sanitized_vendor}_{sanitized_product}_"
-            f"{ingestion_date}_{uuid.uuid4()}.json.gz"
+            f"{ingestion_date}_{uuid.uuid4()}.json"
         )
         log_message(f"Writing {vendor}-{product} → s3://{BUCKET}/{key}")
         s3.put_object(
             Bucket=BUCKET,
             Key=key,
-            Body=gz,
-            ContentEncoding="gzip",
+            Body=raw,
             ContentType="application/x-ndjson"
         )
 
