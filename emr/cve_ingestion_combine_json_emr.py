@@ -19,7 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger("BatchNDJSON")
 
 # CONFIG
-DATE_STR     = "2025-05-03"     # The date folder to process
+DATE_STR     = "2025-05-06"     # The date folder to process
 DO_COMPRESS  = True             # Set False to skip writing GZIP shards
 
 BUCKET        = "cve-ingestion"
