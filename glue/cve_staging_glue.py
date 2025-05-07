@@ -12,15 +12,15 @@ from pyspark.sql.functions import (
     input_file_name, when, flatten, size
 )
 from pyspark.sql.types import (
-    StructType, StructField, StringType, ArrayType, DoubleType, MapType
+    StructType, StructField, StringType, ArrayType, DoubleType, MapType, BooleanType
 )
 
-# --- S3 Definitions ---
+# S3 Definitions
 SOURCE_BUCKET = "s3://cve-ingestion/cve_json/"
 STAGING_BUCKET = "s3://cve-staging/cve_staging_tables/"
 STAGING_LOG_PREFIX = "cve_staging_logs/"
 
-# --- Initialize Spark/Glue ---
+# Initialize Spark/Glue
 args = getResolvedOptions(sys.argv, ["JOB_NAME"])
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -37,14 +37,14 @@ spark = SparkSession.builder \
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-# --- Logging Helper ---
+# Logging Helper
 log_messages = []
 def add_log(msg):
     log_messages.append(f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
 
 add_log("Starting main processing script.")
 
-# --- Step 1: Find latest ingestion folder in S3 ---
+# Step 1: Find latest ingestion folder in S3
 try:
     add_log("Listing ingestion folders using boto3...")
     s3_client = boto3.client('s3')
@@ -66,7 +66,7 @@ except Exception as e:
     add_log(f"Error determining ingestion day: {str(e)}")
     raise
 
-# --- Step 2: Define schemas ---
+# Step 2: Define schemas
 cvelist_schema = StructType([
     StructField("cveMetadata", StructType([
         StructField("datePublished", StringType(), True),
@@ -158,12 +158,20 @@ ndjson_schema = StructType([
     StructField("ingestionTimestamp", StringType(), True),
     StructField("vendor", StringType(), True),
     StructField("product", StringType(), True),
+    StructField("cveDataAvailable", BooleanType(), True),
     StructField("cvelistv5", ArrayType(ArrayType(StringType())), True),
     StructField("fkie_nvd", ArrayType(ArrayType(StringType())), True)
 ])
 
-# --- Step 3: Read NDJSON files ---
-df_raw = spark.read.option("multiline", "false").schema(ndjson_schema).json(latest_directory)
+# Step 3: Read NDJSON files
+df_raw = (
+    spark.read
+         .option("multiline", "false")
+         .schema(ndjson_schema)
+         .json(latest_directory)
+         .filter(col("cveDataAvailable") == True)
+         .drop("cveDataAvailable")
+)
 df_raw = df_raw.withColumn("source_file", input_file_name())
 df_raw = df_raw.withColumn(
     "ingestionTimestamp", 
@@ -175,7 +183,7 @@ df_raw = df_raw.withColumn(
 raw_count = df_raw.count()
 add_log(f"JSON chunk count: {raw_count}")
 
-# --- Step 4a: Process cvelistv5 ---
+# Step 4a: Process cvelistv5
 cvelistv5_df = df_raw.select(
     "vendor", "product", "ingestionTimestamp", "ingestionDate",
     explode("cvelistv5").alias("item")
@@ -310,7 +318,7 @@ cvelistv5_grouped = cvelistv5_df.groupBy(
 
 add_log(f"cvelistv5_df record count after grouping: {cvelistv5_grouped.count()}")
 
-# --- Step 4b: Process fkie_nvd ---
+# Step 4b: Process fkie_nvd
 fkie_df = df_raw.select(
     "vendor", "product", "ingestionTimestamp", "ingestionDate",
     explode("fkie_nvd").alias("item")
@@ -372,7 +380,7 @@ else:
 
 add_log(f"CVSS combined record count: {df_cvss_combined.count()}")
 
-# --- Process CWE from fkie_nvd ---
+# Process CWE from fkie_nvd
 df_cvss_combined = df_cvss_combined.withColumn("weakness", explode_outer("weaknesses")).withColumn(
     "fkie_cwe_struct",
     expr("""
@@ -394,7 +402,7 @@ df_cvss_combined = df_cvss_combined.groupBy(
     array_distinct(flatten(collect_list("fkie_cwe_struct"))).alias("fkie_cweData")
 )
 
-# --- Step 5: Merge cvelistv5 & fkie_nvd ---
+# Step 5: Merge cvelistv5 & fkie_nvd
 cv_df = cvelistv5_grouped.select(
     "vendor", "product", "cveId",
     F.col("ingestionTimestamp").alias("cv_ingestionTimestamp"),
@@ -434,7 +442,7 @@ combined_df = cv_df.join(nvd_df, ["vendor", "product", "cveId"], "outer") \
         ).otherwise(col("cv.alt_cvssData"))
     ).withColumn("capecData", col("cv.alt_capecData"))
 
-# --- Combine CWE from both sides ---
+# Combine CWE from both sides
 cwe_from_cv = combined_df.select("vendor", "product", "cveId", F.explode("cv.alt_cweData").alias("cwe"))
 cwe_from_nvd = combined_df.select("vendor", "product", "cveId", F.explode("nvd.fkie_cweData").alias("cwe"))
 all_cwe = cwe_from_cv.unionByName(cwe_from_nvd)
@@ -450,7 +458,7 @@ cwe_agg = deduped_cwe.groupBy("vendor", "product", "cveId").agg(
 combined_df = combined_df.join(cwe_agg, ["vendor", "product", "cveId"], "left")
 add_log(f"Combined DataFrame record count: {combined_df.count()}")
 
-# --- Step 6: Combine rows if same vendor-product-cveId appears in multiple chunks ---
+# Step 6: Combine rows if same vendor-product-cveId appears in multiple chunks
 final_df = combined_df.groupBy(
     "vendor", "product", "cveId", "ingestionTimestamp", "ingestionDate"
 ).agg(
@@ -475,7 +483,7 @@ final_df = final_df.select(
     regexp_replace(col("Descriptions"), "<[^>]*>", "")
 )
 
-# --- Enforce consistent cvssData field order and transform empty arrays to null ---
+# Enforce consistent cvssData field order and transform empty arrays to null
 final_df = final_df.withColumn(
     "cvssData",
     expr("""
@@ -523,7 +531,7 @@ final_df = final_df.withColumn(
     ).otherwise(col("cweData"))
 )
 
-# --- Step 7: Write to Iceberg table ---
+# Step 7: Write to Iceberg table
 current_date = datetime.now(timezone.utc).strftime("%Y_%m_%d")
 staging_table_name = f"cve_staging_{current_date}"
 staging_table_location = f"{STAGING_BUCKET}{staging_table_name}"
@@ -568,7 +576,7 @@ final_df.write.format("iceberg") \
 
 add_log("Insert executed for all records.")
 
-# --- Step 8: Write logs to S3 ---
+# Step 8: Write logs to S3
 try:
     log_content = "\n".join(log_messages)
     log_file_key = f"{STAGING_LOG_PREFIX}cve_staging_log_{current_date}.txt"
