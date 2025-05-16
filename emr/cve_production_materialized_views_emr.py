@@ -1,3 +1,19 @@
+import argparse
+
+# parse command-line args
+parser = argparse.ArgumentParser(
+    prog="cve_pipeline",
+    description="Run the CVE pipeline in either backfill or incremental mode."
+)
+parser.add_argument(
+    "--run_type",
+    choices=["backfill", "incremental"],
+    default="incremental",
+    help="Which mode to run: full backfill or incremental (default: incremental)"
+)
+args, unknown = parser.parse_known_args()
+run_type = args.run_type
+
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.functions import (
     when, to_date, to_timestamp, year, month, col, countDistinct, sum_distinct, expr, 
@@ -6,13 +22,12 @@ from pyspark.sql.functions import (
 from pyspark.sql.window import Window
 
 # Configuration
-run_type = "backfill"  # or "incremental"
 database = "cve_db"
 NUM_OUT = 24
 
 spark = (
     SparkSession.builder
-        .appName("cve-pipeline")
+        .appName("cve_pipeline")
         # Iceberg & Glue
         .config("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkCatalog")
         .config("spark.sql.catalog.spark_catalog.catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog")
@@ -163,17 +178,17 @@ def enrich_with_risk_flags(df):
         ).otherwise(False))
     )
 
-# Risk-rating expressions
+# Risk-rating ranges derived from cve_threat_index_ranges.sql
 exprs = {
-    "daily_global":   lambda t: when(t.isNull(),"Unknown").when(t>40,"Severe").when(t>20,"High").when(t>10,"Moderate").when(t>0,"Low").otherwise("No Risk"),
-    "daily_vendor":   lambda t: when(t.isNull(),"Unknown").when(t>30,"Severe").when(t>14,"High").when(t>7,"Moderate").when(t>0,"Low").otherwise("No Risk"),
-    "daily_product":  lambda t: when(t.isNull(),"Unknown").when(t>25,"Severe").when(t>12,"High").when(t>6,"Moderate").when(t>0,"Low").otherwise("No Risk"),
-    "monthly_global": lambda t: when(t.isNull(),"Unknown").when(t>120,"Severe").when(t>80,"High").when(t>50,"Moderate").when(t>0,"Low").otherwise("No Risk"),
-    "monthly_vendor": lambda t: when(t.isNull(),"Unknown").when(t>80,"Severe").when(t>43,"High").when(t>20,"Moderate").when(t>0,"Low").otherwise("No Risk"),
-    "monthly_product":lambda t: when(t.isNull(),"Unknown").when(t>25,"Severe").when(t>14,"High").when(t>7,"Moderate").when(t>0,"Low").otherwise("No Risk"),
-    "ytd_global":     lambda t: when(t.isNull(),"Unknown").when(t>180,"Severe").when(t>135,"High").when(t>90,"Moderate").when(t>0,"Low").otherwise("No Risk"),
-    "ytd_vendor":     lambda t: when(t.isNull(),"Unknown").when(t>105,"Severe").when(t>60,"High").when(t>15,"Moderate").when(t>0,"Low").otherwise("No Risk"),
-    "ytd_product":    lambda t: when(t.isNull(),"Unknown").when(t>40,"Severe").when(t>15,"High").when(t>7,"Moderate").when(t>0,"Low").otherwise("No Risk"),
+    "daily_global":   lambda t: when(t.isNull(),"Unknown").when(t>9,"Critical").when(t>7,"High").when(t>4,"Moderate").when(t>1,"Low").otherwise("None"),
+    "daily_vendor":   lambda t: when(t.isNull(),"Unknown").when(t>7,"Critical").when(t>6,"High").when(t>4,"Moderate").when(t>1,"Low").otherwise("None"),
+    "daily_product":  lambda t: when(t.isNull(),"Unknown").when(t>7,"Critical").when(t>7,"High").when(t>5,"Moderate").when(t>1,"Low").otherwise("None"),
+    "monthly_global": lambda t: when(t.isNull(),"Unknown").when(t>244,"Critical").when(t>137,"High").when(t>95,"Moderate").when(t>1,"Low").otherwise("None"),
+    "monthly_vendor": lambda t: when(t.isNull(),"Unknown").when(t>10,"Critical").when(t>7,"High").when(t>4,"Moderate").when(t>1,"Low").otherwise("None"),
+    "monthly_product":lambda t: when(t.isNull(),"Unknown").when(t>11,"Critical").when(t>7,"High").when(t>5,"Moderate").when(t>1,"Low").otherwise("None"),
+    "ytd_global":     lambda t: when(t.isNull(),"Unknown").when(t>293,"Critical").when(t>236,"High").when(t>175,"Moderate").when(t>1,"Low").otherwise("None"),
+    "ytd_vendor":     lambda t: when(t.isNull(),"Unknown").when(t>10,"Critical").when(t>7,"High").when(t>5,"Moderate").when(t>1,"Low").otherwise("None"),
+    "ytd_product":    lambda t: when(t.isNull(),"Unknown").when(t>12,"Critical").when(t>8,"High").when(t>5,"Moderate").when(t>1,"Low").otherwise("None"),
 }
 
 # Weighted score
