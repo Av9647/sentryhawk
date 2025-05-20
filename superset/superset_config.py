@@ -79,7 +79,7 @@ ENABLE_PROXY_FIX = True
 # ---------------------------------------------------------------------
 # For email reports or thumbnails to use correct external URL
 # ---------------------------------------------------------------------
-WEBDRIVER_BASEURL = "https://www.cveintel.org"
+WEBDRIVER_BASEURL = "https://www.sentryhawk.org"
 
 # ---------------------------------------------------------------------
 # Override Superset’s default headers to allow framing:
@@ -88,7 +88,7 @@ WEBDRIVER_BASEURL = "https://www.cveintel.org"
 # ---------------------------------------------------------------------
 HTTP_HEADERS = {
     "X-Frame-Options": "ALLOWALL",
-    "Content-Security-Policy": "frame-ancestors 'self' https://www.cveintel.org; " 
+    "Content-Security-Policy": "frame-ancestors 'self' https://www.sentryhawk.org; " 
                               "default-src 'self'; img-src 'self' data:; " 
                               "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
 }

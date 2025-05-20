@@ -3,12 +3,12 @@ function handler(event) {
   const host = r.headers.host && r.headers.host.value.toLowerCase();
 
   // 1) non‑www → www
-  if (host === "cveintel.org") {
+  if (host === "sentryhawk.org") {
     return {
       statusCode: 301,
       statusDescription: "Moved Permanently",
       headers: {
-        location: { value: "https://www.cveintel.org" }
+        location: { value: "https://www.sentryhawk.org" }
       }
     };
   }
