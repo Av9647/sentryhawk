@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime, timedelta, timezone
 
 # parse command-line args
 parser = argparse.ArgumentParser(
@@ -8,8 +9,8 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "--run_type",
     choices=["backfill", "incremental"],
-    default="incremental",
-    help="Which mode to run: full backfill or incremental (default: incremental)"
+    default="backfill",
+    help="Which mode to run: full backfill or incremental (default: backfill)"
 )
 args, unknown = parser.parse_known_args()
 run_type = args.run_type
@@ -32,6 +33,7 @@ spark = (
         .config("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkCatalog")
         .config("spark.sql.catalog.spark_catalog.catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog")
         .config("spark.sql.catalog.spark_catalog.warehouse", "s3://cve-production/")
+        .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
         .config("spark.sql.iceberg.handle-timestamp-without-timezone", "true")
         # Performance & logging
         .config("spark.eventLog.enabled", "false")
@@ -373,6 +375,46 @@ if run_type == "backfill":
     )
     print("Full backfill complete")
 
+    # Expire snapshots & remove older orphan files
+    tables_to_clean = [
+        "cve_production_lookup",
+        "cve_production_daily_global",
+        "cve_production_daily_vendor",
+        "cve_production_daily_product",
+        "cve_production_monthly_global",
+        "cve_production_monthly_vendor",
+        "cve_production_monthly_product",
+        "cve_production_ytd_global",
+        "cve_production_ytd_vendor",
+        "cve_production_ytd_product",
+        "cve_production_daily_global_running",
+        "cve_production_daily_vendor_running",
+        "cve_production_daily_product_running",
+        "cve_production_mv_meta"
+    ]
+
+    # compute a timestamp 24 hours ago (UTC)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
+    for tbl in tables_to_clean:
+        # expire all but the last snapshot
+        spark.sql(f"""
+          CALL spark_catalog.system.expire_snapshots(
+            table      => '{database}.{tbl}',
+            retain_last=> 1
+          )
+        """)
+
+        # delete unreferenced files older than cutoff
+        spark.sql(f"""
+          CALL spark_catalog.system.remove_orphan_files(
+            table      => '{database}.{tbl}',
+            older_than => TIMESTAMP '{cutoff_str}'
+          )
+        """)
+
+    print(f"Expired snapshots and removed orphan files older than {cutoff_str} for all materialized views")
 
 elif run_type == "incremental":
 
@@ -383,37 +425,64 @@ elif run_type == "incremental":
              .filter(col("validFrom") > to_timestamp(lit(last_run_ts)))
              .filter("currentFlag = true")
     )
-    updates = enrich_with_risk_flags(transform_for_lookup(updates_base))
-    updates.createOrReplaceTempView("updates_temp")
+    updates = (
+        enrich_with_risk_flags(transform_for_lookup(updates_base))
+        .withColumn("year_published", year(col("datePublished")))
+        .withColumn("date_published", to_date(col("datePublished")))
+        )
+    
+    # Deduplicate on the composite key, keeping only the row with the latest validFrom
+    dedupe_win = Window.partitionBy("cveId", "vendor", "product") \
+                       .orderBy(col("validFrom").desc())
+    updates_unique = (
+        updates
+          .withColumn("rn", F.row_number().over(dedupe_win))
+          .filter(col("rn") == 1)
+          .drop("rn")
+    )
+
+    updates_unique.createOrReplaceTempView("updates_temp")
     print(f"[DEBUG] updates_base: {updates_base.count()} new/changed rows since {last_run_ts}")
 
-    # Merge into lookup table
+    # Delete any stale lookup rows for these keys
     spark.sql(f"""
-      MERGE INTO {database}.cve_production_lookup AS target
-      USING updates_temp                  AS source
-        ON target.cveId = source.cveId
-      WHEN MATCHED THEN
-        UPDATE SET *
-      WHEN NOT MATCHED THEN
-        INSERT *
+      DELETE FROM {database}.cve_production_lookup
+      WHERE EXISTS (
+        SELECT 1
+          FROM updates_temp AS source
+         WHERE {database}.cve_production_lookup.cveId   = source.cveId
+           AND {database}.cve_production_lookup.vendor  = source.vendor
+           AND {database}.cve_production_lookup.product = source.product
+      )
     """)
-    print("[DEBUG] Incremental Stage 2 – MERGE complete")
+    print("[DEBUG] Deleted old lookup rows for impacted keys")
+
+    # Insert the fresh, single-row-per-key data
+    spark.sql(f"""
+      INSERT INTO {database}.cve_production_lookup
+      SELECT datePublished, vendor, product, cveId, descriptions, cvssScore, severity, vectorString,
+      impactScore, exploitabilityScore, source, sourceType, cvssVersion, vulnStatus, cweData, capecData,
+      cvssData, dateReserved, dateUpdated, datePublic, lastModified, year_published, date_published
+      FROM updates_temp
+    """)
+    print("[DEBUG] Inserted updated lookup rows")
 
     # Helper for dynamic overwrite of partitions
     def dynamic_overwrite(level, df, dims, expr_key, suffix, partition_cols):
         df_agg = (
-            df.groupBy(*dims, "datePublished")
-              .agg(*common_aggs())
-              .withColumn("risk_rating", exprs[expr_key](col("threat_index")))
-              .withColumn("year_published", year(col("datePublished")))
-              .withColumn("date_published", to_date(col("datePublished")))
+            df.withColumn("weighted_score", weighted)
+            .groupBy(*dims, "datePublished")
+            .agg(*common_aggs())
+            .withColumn("risk_rating", exprs[expr_key](col("threat_index")))
+            .withColumn("year_published", year(col("datePublished")))
+            .withColumn("date_published", to_date(col("datePublished")))
         )
         write_iceberg(df_agg, suffix,
                       f"s3://cve-production/cve_production_tables/{suffix}/",
                       partition_cols, mode="overwrite", dynamic=True)
 
     # Overwrite impacted daily partitions
-    days = [r.d for r in updates.select(to_date(col("datePublished")).alias("d")).distinct().collect()]
+    days = [r.d for r in updates_unique.select(to_date(col("datePublished")).alias("d")).distinct().collect()]
     for d in days:
         day_df = (
             spark.table(f"{database}.cve_production_lookup")
@@ -425,7 +494,7 @@ elif run_type == "incremental":
         dynamic_overwrite("product", day_df, ["vendor","product"], "daily_product", "cve_production_daily_product", ["year_published","date_published"])
 
     # Overwrite impacted monthly partitions
-    ym_list = updates.select(
+    ym_list = updates_unique.select(
                   year(col("datePublished")).alias("y"),
                   month(col("datePublished")).alias("m")
               ).distinct().collect()
@@ -458,7 +527,7 @@ elif run_type == "incremental":
             )
 
     # Overwrite impacted YTD partitions
-    year_list = [r.y for r in updates.select(year(col("datePublished")).alias("y")).distinct().collect()]
+    year_list = [r.y for r in updates_unique.select(year(col("datePublished")).alias("y")).distinct().collect()]
     for y in year_list:
         ytd_df = (
             spark.table(f"{database}.cve_production_lookup")
