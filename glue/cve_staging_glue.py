@@ -16,7 +16,7 @@ from pyspark.sql.types import (
 )
 
 # S3 Definitions
-SOURCE_BUCKET = "s3://cve-ingestion/cve_json/"
+SOURCE_BUCKET = "s3://cve-ingestion/cve_batch/"
 STAGING_BUCKET = "s3://cve-staging/cve_staging_tables/"
 STAGING_LOG_PREFIX = "cve_staging_logs/"
 
@@ -49,17 +49,17 @@ try:
     add_log("Listing ingestion folders using boto3...")
     s3_client = boto3.client('s3')
     bucket_name = "cve-ingestion"
-    prefix = "cve_json/"
+    prefix = "cve_batch/"
     response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
     ingestion_days = set()
     for obj in response.get("Contents", []):
-        match = re.search(r"cve_json/(\d{4}-\d{2}-\d{2})/", obj["Key"])
+        match = re.search(r"cve_batch/(\d{4}-\d{2}-\d{2})/", obj["Key"])
         if match:
             ingestion_days.add(match.group(1))
     if not ingestion_days:
         raise Exception("No valid ingestion day folders found in S3.")
     latest_day = max(ingestion_days)
-    latest_directory = f"s3a://{bucket_name}/cve_json/{latest_day}/*.gz"
+    latest_directory = f"s3a://{bucket_name}/cve_batch/{latest_day}/*.ndjson"
     add_log(f"Latest ingestion day determined: {latest_day}")
     add_log(f"Reading NDJSON from: {latest_directory}")
 except Exception as e:

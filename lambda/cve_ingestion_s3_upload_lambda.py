@@ -21,7 +21,7 @@ def fetch_cve_data(vendor: str, product: str) -> dict:
         "https://cve.circl.lu/api/search/"
         f"{urllib.parse.quote(vendor)}/{urllib.parse.quote(product)}"
     )
-    resp = requests.get(url, timeout=120)
+    resp = requests.get(url, timeout=720)
     log_message(f"Fetched {vendor}-{product}, status {resp.status_code}")
     if resp.status_code != 200:
         raise RuntimeError(f"CVE API returned {resp.status_code} for {vendor}-{product}")
