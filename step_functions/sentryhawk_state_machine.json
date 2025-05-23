@@ -1,0 +1,41 @@
+{
+  "Comment": "Sentryhawk State Machine",
+  "StartAt": "Start DB EC2",
+  "States": {
+    "Start DB EC2": {
+      "Type": "Task",
+      "Arguments": {
+        "InstanceIds": [
+          "i-xxxxxxxxxxxxxxxxx"
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ec2:startInstances",
+      "Next": "Wait"
+    },
+    "Wait": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "Init CDC Containers"
+    },
+    "Init CDC Containers": {
+      "Type": "Task",
+      "Arguments": {
+        "DocumentName": "AWS-RunShellScript",
+        "InstanceIds": [
+          "i-xxxxxxxxxxxxxxxxx"
+        ],
+        "Parameters": {
+          "workingDirectory": [
+            "/home/ec2-user/CVE-Search-Docker"
+          ],
+          "commands": [
+            "sudo -u ec2-user bash -c 'docker compose up -d mongo redis cve_search'"
+          ]
+        }
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "End": true
+    }
+  },
+  "QueryLanguage": "JSONata"
+}
