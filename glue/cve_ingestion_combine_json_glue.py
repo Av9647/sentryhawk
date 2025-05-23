@@ -68,8 +68,8 @@ def main():
     job.init(JOB_NAME, args)
 
     # 1b) Set shuffle partitions only (other cluster configs done in Glue console)
-    spark.conf.set("spark.sql.shuffle.partitions", "80")
-    logger.info("SparkSession initialized with shuffle.partitions=80")
+    spark.conf.set("spark.sql.shuffle.partitions", "4")
+    logger.info("SparkSession initialized with shuffle.partitions=4")
 
     # 2) Schema definition
     schema = StructType([
@@ -101,14 +101,14 @@ def main():
     df = df.select([f.name for f in schema.fields])
     json_ds = (
         df.select(to_json(struct(*df.columns)).alias("value"))
-          .repartition(80)
+          .repartition(4)
     )
-    logger.info(f"Prepared 80 partitions of NDJSON in {perf_counter()-t2:.1f}s")
+    logger.info(f"Prepared 4 partitions of NDJSON in {perf_counter()-t2:.1f}s")
 
     # 5) Write uncompressed
     t3 = perf_counter()
     json_ds.write.mode("overwrite").text(UNCOMP_PATH)
-    logger.info(f"Wrote 80 uncompressed shards to {UNCOMP_PATH} in {perf_counter()-t3:.1f}s")
+    logger.info(f"Wrote 4 uncompressed shards to {UNCOMP_PATH} in {perf_counter()-t3:.1f}s")
 
     # 6) Optionally write compressed
     if DO_COMPRESS:
@@ -117,7 +117,7 @@ def main():
                .mode("overwrite") \
                .option("compression","gzip") \
                .text(COMP_PATH)
-        logger.info(f"Wrote 80 compressed shards to {COMP_PATH} in {perf_counter()-t4:.1f}s")
+        logger.info(f"Wrote 4 compressed shards to {COMP_PATH} in {perf_counter()-t4:.1f}s")
 
     # 7) Rename with Hadoop FS
     t5 = perf_counter()
