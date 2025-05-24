@@ -6,23 +6,26 @@
       "Type": "Task",
       "Arguments": {
         "InstanceIds": [
-          "i-xxxxxxxxxxxxxxxxx"
+          "i-07126efdc8130b47e"
         ]
       },
       "Resource": "arn:aws:states:::aws-sdk:ec2:startInstances",
-      "Next": "Wait"
+      "Next": "Wait for EC2 Start",
+      "Output": {
+        "InstanceId": "{% $states.result.StartingInstances[0].InstanceId %}"
+      }
     },
-    "Wait": {
+    "Wait for EC2 Start": {
       "Type": "Wait",
-      "Seconds": 20,
-      "Next": "Init CDC Containers"
+      "Seconds": 15,
+      "Next": "Initialize Containers"
     },
-    "Init CDC Containers": {
+    "Initialize Containers": {
       "Type": "Task",
       "Arguments": {
         "DocumentName": "AWS-RunShellScript",
         "InstanceIds": [
-          "i-xxxxxxxxxxxxxxxxx"
+          "{% $states.input.InstanceId %}"
         ],
         "Parameters": {
           "workingDirectory": [
@@ -34,6 +37,116 @@
         }
       },
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "Next": "Wait for Container Start",
+      "Output": {
+        "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+      }
+    },
+    "Wait for Container Start": {
+      "Type": "Wait",
+      "Seconds": 75,
+      "Next": "Run DB Refresh"
+    },
+    "Run DB Refresh": {
+      "Type": "Task",
+      "Arguments": {
+        "DocumentName": "AWS-RunShellScript",
+        "InstanceIds": [
+          "{% $states.input.InstanceId %}"
+        ],
+        "Parameters": {
+          "workingDirectory": [
+            "/home/ec2-user/CVE-Search-Docker"
+          ],
+          "commands": [
+            "sudo -u ec2-user bash -c 'chmod +x ./refresh.sh && ./refresh.sh > refresh.log 2>&1'"
+          ]
+        }
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "Next": "Wait For DB Refresh",
+      "Output": {
+        "CommandId": "{% $states.result.Command.CommandId %}",
+        "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+      }
+    },
+    "Wait For DB Refresh": {
+      "Type": "Wait",
+      "Seconds": 30,
+      "Next": "Get DB Refresh Status"
+    },
+    "Get DB Refresh Status": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
+      "Next": "Check DB Refresh Status",
+      "Arguments": {
+        "CommandId": "{% $states.input.CommandId %}",
+        "InstanceId": "{% $states.input.InstanceId %}"
+      },
+      "Output": {
+        "CommandId": "{% $states.result.CommandId %}",
+        "InstanceId": "{% $states.result.InstanceId %}",
+        "Status": "{% $states.result.Status %}"
+      }
+    },
+    "Check DB Refresh Status": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Next": "Shutdown Containers",
+          "Condition": "{% ($states.input.Status) = (\"Success\") %}"
+        },
+        {
+          "Next": "Wait For DB Refresh",
+          "Condition": "{% (($states.input.Status) = (\"InProgress\") or ($states.input.Status) = (\"Pending\")) %}"
+        }
+      ],
+      "Default": "DB Refresh Failed"
+    },
+    "DB Refresh Failed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "Message": "{% $states.input & '\n\nDB Refresh failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
+      },
+      "Next": "Run DB Refresh"
+    },
+    "Shutdown Containers": {
+      "Type": "Task",
+      "Arguments": {
+        "DocumentName": "AWS-RunShellScript",
+        "InstanceIds": [
+          "{% $states.input.InstanceId %}"
+        ],
+        "Parameters": {
+          "workingDirectory": [
+            "/home/ec2-user/CVE-Search-Docker"
+          ],
+          "commands": [
+            "sudo -u ec2-user bash -c 'docker compose down'"
+          ]
+        }
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "Next": "Wait for Container Shutdown",
+      "Output": {
+        "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+      }
+    },
+    "Wait for Container Shutdown": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "Stop DB EC2"
+    },
+    "Stop DB EC2": {
+      "Type": "Task",
+      "Arguments": {
+        "InstanceIds": [
+          "{% $states.input.InstanceId %}"
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
       "End": true
     }
   },
