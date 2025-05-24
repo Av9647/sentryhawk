@@ -4,9 +4,10 @@
   "States": {
     "Start DB EC2": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Arguments": {
         "InstanceIds": [
-          "i-07126efdc8130b47e"
+          "i-xxxxxxxxxxxxxxxxx"
         ]
       },
       "Resource": "arn:aws:states:::aws-sdk:ec2:startInstances",
@@ -22,6 +23,7 @@
     },
     "Initialize Containers": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Arguments": {
         "DocumentName": "AWS-RunShellScript",
         "InstanceIds": [
@@ -49,6 +51,7 @@
     },
     "Run DB Refresh": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Arguments": {
         "DocumentName": "AWS-RunShellScript",
         "InstanceIds": [
@@ -77,6 +80,7 @@
     },
     "Get DB Refresh Status": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
       "Next": "Check DB Refresh Status",
       "Arguments": {
@@ -91,9 +95,10 @@
     },
     "Check DB Refresh Status": {
       "Type": "Choice",
+      "QueryLanguage": "JSONata",
       "Choices": [
         {
-          "Next": "Shutdown Containers",
+          "Next": "Product SQS Poll",
           "Condition": "{% ($states.input.Status) = (\"Success\") %}"
         },
         {
@@ -105,15 +110,272 @@
     },
     "DB Refresh Failed": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
       "Arguments": {
+        "InstanceId": "{% $states.input.InstanceId %}",
         "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
         "Message": "{% $states.input & '\n\nDB Refresh failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
       },
       "Next": "Run DB Refresh"
     },
+    "Product SQS Poll": {
+      "Type": "Task",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_product_sqs",
+        "AttributeNames": [
+          "ApproximateNumberOfMessages",
+          "ApproximateNumberOfMessagesNotVisible"
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:sqs:getQueueAttributes",
+      "Next": "Check Product Queue"
+    },
+    "Check Product Queue": {
+      "Type": "Choice",
+      "QueryLanguage": "JSONata",
+      "Choices": [
+        {
+          "Next": "Product DLQ Poll",
+          "Condition": "{% ($states.input.Attributes.ApproximateNumberOfMessages ~> $number = 0 and $states.input.Attributes.ApproximateNumberOfMessagesNotVisible ~> $number = 0) %}"
+        }
+      ],
+      "Default": "Wait for Products"
+    },
+    "Product DLQ Poll": {
+      "Type": "Task",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_product_sqs_dlq",
+        "AttributeNames": [
+          "ApproximateNumberOfMessages",
+          "ApproximateNumberOfMessagesNotVisible"
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:sqs:getQueueAttributes",
+      "Next": "Check Product DLQ"
+    },
+    "Check Product DLQ": {
+      "Type": "Choice",
+      "QueryLanguage": "JSONata",
+      "Choices": [
+        {
+          "Next": "Map Backup",
+          "Condition": "{% ($states.input.Attributes.ApproximateNumberOfMessages ~> $number = 0 and $states.input.Attributes.ApproximateNumberOfMessagesNotVisible ~> $number = 0) %}"
+        }
+      ],
+      "Default": "Products Not Processed"
+    },
+    "Glue Jobs": {
+      "Type": "Pass",
+      "Next": "Glue Job Iterator",
+      "Result": {
+        "jobs": [
+          "cve_ingestion_combine_json_glue",
+          "cve_staging_glue",
+          "cve_staging_glue_dq",
+          "cve_production_glue"
+        ]
+      },
+      "ResultPath": "$.GlueJobs"
+    },
+    "Glue Job Iterator": {
+      "Type": "Map",
+      "ItemsPath": "$.GlueJobs.jobs",
+      "MaxConcurrency": 1,
+      "ItemSelector": {
+        "jobname.$": "$$.Map.Item.Value"
+      },
+      "Iterator": {
+        "StartAt": "Glue Job",
+        "States": {
+          "Glue Job": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::glue:startJobRun.sync",
+            "Parameters": {
+              "JobName.$": "$.jobname"
+            },
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Comment": "Glue Job Failed",
+                "Next": "Glue Job Failed"
+              }
+            ],
+            "Next": "Glue Job Successful"
+          },
+          "Glue Job Failed": {
+            "Type": "Task",
+            "QueryLanguage": "JSONata",
+            "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+            "Arguments": {
+              "Message": "{% $states.input & '\n\nGlue job failed. Resume the pipeline after fixing job: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}",
+              "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
+            },
+            "Next": "Glue Job"
+          },
+          "Glue Job Successful": {
+            "Type": "Succeed"
+          }
+        }
+      },
+      "End": true
+    },
+    "Products Not Processed": {
+      "Type": "Task",
+      "QueryLanguage": "JSONata",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "Message": "{% $states.input %}"
+      },
+      "Next": "Product DLQ Backup"
+    },
+    "Product DLQ Backup": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "Next": "Wait for Product DLQ Backup",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "DocumentName": "AWS-RunShellScript",
+        "InstanceIds": [
+          "i-xxxxxxxxxxxxxxxxx"
+        ],
+        "Parameters": {
+          "workingDirectory": [
+            "/home/ec2-user/CVE-Search-Docker"
+          ],
+          "commands": [
+            "sudo -u ec2-user bash -c 'chmod +x cve_sqs_log.py && python3 cve_sqs_log.py'"
+          ]
+        }
+      },
+      "Output": {
+        "CommandId": "{% $states.result.Command.CommandId %}",
+        "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+      }
+    },
+    "Wait for Product DLQ Backup": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "Get Product DLQ Backup Status"
+    },
+    "Get Product DLQ Backup Status": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
+      "Next": "Check Product DLQ Backup Status",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "CommandId": "{% $states.input.CommandId %}",
+        "InstanceId": "{% $states.input.InstanceId %}"
+      },
+      "Output": {
+        "CommandId": "{% $states.result.CommandId %}",
+        "InstanceId": "{% $states.result.InstanceId %}",
+        "Status": "{% $states.result.Status %}"
+      }
+    },
+    "Check Product DLQ Backup Status": {
+      "Type": "Choice",
+      "Default": "Product DLQ Backup Failed",
+      "Choices": [
+        {
+          "Next": "Map Backup",
+          "Condition": "{% ($states.input.Status) = (\"Success\") %}"
+        },
+        {
+          "Next": "Wait for Product DLQ Backup",
+          "Condition": "{% (($states.input.Status) = (\"InProgress\") or ($states.input.Status) = (\"Pending\")) %}"
+        }
+      ],
+      "QueryLanguage": "JSONata"
+    },
+    "Product DLQ Backup Failed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "Next": "Product DLQ Backup",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "InstanceId": "{% $states.input.InstanceId %}",
+        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "Message": "{% $states.input & '\n\nProduct DLQ Backup failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
+      }
+    },
+    "Map Backup": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "Next": "Wait for Map Backup",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "DocumentName": "AWS-RunShellScript",
+        "InstanceIds": [
+          "{% $states.input.InstanceId %}"
+        ],
+        "Parameters": {
+          "workingDirectory": [
+            "/home/ec2-user/CVE-Search-Docker"
+          ],
+          "commands": [
+            "sudo -u ec2-user bash -c 'chmod +x cve_mongo_map_backup.sh && ./cve_mongo_map_backup.sh'"
+          ]
+        }
+      },
+      "Output": {
+        "CommandId": "{% $states.result.Command.CommandId %}",
+        "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+      }
+    },
+    "Wait for Map Backup": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "Get Map Backup Status"
+    },
+    "Get Map Backup Status": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
+      "Next": "Check Map Backup Status",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "CommandId": "{% $states.input.CommandId %}",
+        "InstanceId": "{% $states.input.InstanceId %}"
+      },
+      "Output": {
+        "CommandId": "{% $states.result.CommandId %}",
+        "InstanceId": "{% $states.result.InstanceId %}",
+        "Status": "{% $states.result.Status %}"
+      }
+    },
+    "Check Map Backup Status": {
+      "Type": "Choice",
+      "Default": "Map Backup Failed",
+      "Choices": [
+        {
+          "Next": "Shutdown Containers",
+          "Condition": "{% ($states.input.Status) = (\"Success\") %}"
+        },
+        {
+          "Next": "Wait for Map Backup",
+          "Condition": "{% (($states.input.Status) = (\"InProgress\") or ($states.input.Status) = (\"Pending\")) %}"
+        }
+      ],
+      "QueryLanguage": "JSONata"
+    },
+    "Map Backup Failed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "Next": "Map Backup",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "Message": "{% $states.input & '\n\nMap backup failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
+      }
+    },
     "Shutdown Containers": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Arguments": {
         "DocumentName": "AWS-RunShellScript",
         "InstanceIds": [
@@ -141,14 +403,19 @@
     },
     "Stop DB EC2": {
       "Type": "Task",
+      "QueryLanguage": "JSONata",
       "Arguments": {
         "InstanceIds": [
           "{% $states.input.InstanceId %}"
         ]
       },
       "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
-      "End": true
+      "Next": "Glue Jobs"
+    },
+    "Wait for Products": {
+      "Type": "Wait",
+      "Seconds": 120,
+      "Next": "Product SQS Poll"
     }
-  },
-  "QueryLanguage": "JSONata"
+  }
 }
