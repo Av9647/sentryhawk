@@ -2,26 +2,33 @@
   "Comment": "Sentryhawk State Machine",
   "StartAt": "Start DB EC2",
   "States": {
+    "Wait for Druid EC2 Shutdown": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "Get Druid EC2 State",
+      "QueryLanguage": "JSONata"
+    },
     "Start DB EC2": {
       "Type": "Task",
       "QueryLanguage": "JSONata",
       "Arguments": {
         "InstanceIds": [
-          "i-xxxxxxxxxxxxxxxxx"
+          "i-07126efdc8130b47e"
         ]
       },
       "Resource": "arn:aws:states:::aws-sdk:ec2:startInstances",
-      "Next": "Wait for EC2 Start",
+      "Next": "Wait for DB EC2 Start",
       "Output": {
         "InstanceId": "{% $states.result.StartingInstances[0].InstanceId %}"
       }
     },
-    "Wait for EC2 Start": {
+    "Wait for DB EC2 Start": {
       "Type": "Wait",
       "Seconds": 15,
-      "Next": "Initialize Containers"
+      "Next": "Start DB Containers",
+      "QueryLanguage": "JSONata"
     },
-    "Initialize Containers": {
+    "Start DB Containers": {
       "Type": "Task",
       "QueryLanguage": "JSONata",
       "Arguments": {
@@ -39,15 +46,16 @@
         }
       },
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
-      "Next": "Wait for Container Start",
+      "Next": "Wait for DB Container Start",
       "Output": {
         "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
       }
     },
-    "Wait for Container Start": {
+    "Wait for DB Container Start": {
       "Type": "Wait",
       "Seconds": 75,
-      "Next": "Run DB Refresh"
+      "Next": "Run DB Refresh",
+      "QueryLanguage": "JSONata"
     },
     "Run DB Refresh": {
       "Type": "Task",
@@ -76,7 +84,8 @@
     "Wait For DB Refresh": {
       "Type": "Wait",
       "Seconds": 30,
-      "Next": "Get DB Refresh Status"
+      "Next": "Get DB Refresh Status",
+      "QueryLanguage": "JSONata"
     },
     "Get DB Refresh Status": {
       "Type": "Task",
@@ -106,24 +115,35 @@
           "Condition": "{% (($states.input.Status) = (\"InProgress\") or ($states.input.Status) = (\"Pending\")) %}"
         }
       ],
-      "Default": "DB Refresh Failed"
+      "Default": "Shutdown DB EC2"
+    },
+    "Shutdown DB EC2": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
+      "Next": "DB Refresh Failed",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "InstanceIds": [
+          "{% $states.input.InstanceId %}"
+        ]
+      },
+      "Output": "{% $states.input %}"
     },
     "DB Refresh Failed": {
       "Type": "Task",
       "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
       "Arguments": {
-        "InstanceId": "{% $states.input.InstanceId %}",
-        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
         "Message": "{% $states.input & '\n\nDB Refresh failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
       },
-      "Next": "Run DB Refresh"
+      "Next": "Start DB EC2"
     },
     "Product SQS Poll": {
       "Type": "Task",
       "QueryLanguage": "JSONata",
       "Arguments": {
-        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_product_sqs",
+        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/${ACCOUNT_ID}/cve_ingestion_vendor_product_sqs",
         "AttributeNames": [
           "ApproximateNumberOfMessages",
           "ApproximateNumberOfMessagesNotVisible"
@@ -147,7 +167,7 @@
       "Type": "Task",
       "QueryLanguage": "JSONata",
       "Arguments": {
-        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_product_sqs_dlq",
+        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/${ACCOUNT_ID}/cve_ingestion_vendor_product_sqs_dlq",
         "AttributeNames": [
           "ApproximateNumberOfMessages",
           "ApproximateNumberOfMessagesNotVisible"
@@ -213,7 +233,7 @@
             "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
             "Arguments": {
               "Message": "{% $states.input & '\n\nGlue job failed. Resume the pipeline after fixing job: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}",
-              "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
+              "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic"
             },
             "Next": "Glue Job"
           },
@@ -222,14 +242,225 @@
           }
         }
       },
-      "End": true
+      "Next": "Create EMR Cluster"
+    },
+    "Create EMR Cluster": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:createCluster",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "Name": "cve_production_materialized_views_emr",
+        "LogUri": "s3://aws-logs-${ACCOUNT_ID}-us-east-2/elasticmapreduce",
+        "ReleaseLabel": "emr-7.8.0",
+        "ServiceRole": "arn:aws:iam::${ACCOUNT_ID}:role/service-role/AmazonEMR-ServiceRole-20250504T165815",
+        "JobFlowRole": "cve_ingestion_emr_role",
+        "Instances": {
+          "KeepJobFlowAliveWhenNoSteps": true,
+          "Ec2SubnetIds": [
+            "subnet-0a896bf02807dd0c2"
+          ],
+          "EmrManagedMasterSecurityGroup": "sg-09e703ba95274004c",
+          "EmrManagedSlaveSecurityGroup": "sg-03c1991f2ebda5c33",
+          "AdditionalMasterSecurityGroups": [],
+          "AdditionalSlaveSecurityGroups": [],
+          "InstanceGroups": [
+            {
+              "Name": "Primary",
+              "InstanceRole": "MASTER",
+              "InstanceType": "m5.xlarge",
+              "InstanceCount": 1,
+              "EbsConfiguration": {
+                "EbsBlockDeviceConfigs": [
+                  {
+                    "VolumeSpecification": {
+                      "VolumeType": "gp2",
+                      "SizeInGB": 32
+                    },
+                    "VolumesPerInstance": 2
+                  }
+                ]
+              }
+            },
+            {
+              "Name": "Core",
+              "InstanceRole": "CORE",
+              "InstanceType": "r5.xlarge",
+              "InstanceCount": 4,
+              "EbsConfiguration": {
+                "EbsBlockDeviceConfigs": [
+                  {
+                    "VolumeSpecification": {
+                      "VolumeType": "gp2",
+                      "SizeInGB": 32
+                    },
+                    "VolumesPerInstance": 2
+                  }
+                ],
+                "EbsOptimized": true
+              }
+            }
+          ]
+        },
+        "BootstrapActions": [
+          {
+            "Name": "cve_ingestion_install_dependencies_emr",
+            "ScriptBootstrapAction": {
+              "Path": "s3://cve-code/emr/cve_ingestion_install_dependencies_emr.sh",
+              "Args": []
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "for-use-with-amazon-emr-managed-policies",
+            "Value": "true"
+          }
+        ],
+        "Applications": [
+          {
+            "Name": "Spark"
+          }
+        ],
+        "Configurations": [
+          {
+            "Classification": "spark-hive-site",
+            "Properties": {
+              "hive.metastore.client.factory.class": "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"
+            }
+          }
+        ],
+        "ScaleDownBehavior": "TERMINATE_AT_TASK_COMPLETION",
+        "AutoTerminationPolicy": {
+          "IdleTimeout": 3600
+        }
+      },
+      "Next": "Wait for Cluster",
+      "Output": {
+        "ClusterId": "{% $states.result.ClusterId %}"
+      }
+    },
+    "Wait for Cluster": {
+      "Type": "Wait",
+      "Seconds": 120,
+      "Next": "Get EMR State",
+      "QueryLanguage": "JSONata"
+    },
+    "Get EMR State": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:emr:describeCluster",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "ClusterId": "{% $states.input.ClusterId %}"
+      },
+      "Output": {
+        "ClusterId": "{% $states.result.Cluster.Id %}",
+        "State": "{% $states.result.Cluster.Status.State %}"
+      },
+      "Next": "Check EMR State"
+    },
+    "Check EMR State": {
+      "Type": "Choice",
+      "Default": "Wait for Cluster",
+      "Choices": [
+        {
+          "Next": "Add EMR Step",
+          "Condition": "{% ($states.input.State) = (\"WAITING\") %}"
+        },
+        {
+          "Next": "EMR Cluster Failed",
+          "Condition": "{% (($states.input.State) = (\"TERMINATING\") or ($states.input.State) = (\"TERMINATED\") or ($states.input.State) = (\"TERMINATED_WITH_ERRORS\")) %}"
+        }
+      ],
+      "QueryLanguage": "JSONata"
+    },
+    "EMR Cluster Failed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "Next": "Create EMR Cluster",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
+        "Message": "{% $states.input & '\n\nEMR Cluster failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
+      }
+    },
+    "Add EMR Step": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:addStep",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "ClusterId": "{% $states.input.ClusterId %}",
+        "Step": {
+          "Name": "cve_production_materialized_views_emr",
+          "ActionOnFailure": "TERMINATE_CLUSTER",
+          "HadoopJarStep": {
+            "Jar": "command-runner.jar",
+            "Args": [
+              "spark-submit",
+              "--deploy-mode",
+              "cluster",
+              "s3://cve-code/emr/cve_production_materialized_views_emr.py"
+            ]
+          }
+        }
+      },
+      "Output": {
+        "ClusterId": "{% $states.input.ClusterId %}",
+        "StepId": "{% $states.result.StepId %}"
+      },
+      "Next": "Wait for Step"
+    },
+    "Wait for Step": {
+      "Type": "Wait",
+      "Seconds": 120,
+      "Next": "Get EMR Step",
+      "QueryLanguage": "JSONata"
+    },
+    "Get EMR Step": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:emr:describeStep",
+      "Next": "Check EMR Step",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "ClusterId": "{% $states.input.ClusterId %}",
+        "StepId": "{% $states.input.StepId %}"
+      },
+      "Output": {
+        "ClusterId": "{% $states.input.ClusterId %}",
+        "StepId": "{% $states.result.Step.Id %}",
+        "State": "{% $states.result.Step.Status.State %}"
+      }
+    },
+    "Check EMR Step": {
+      "Type": "Choice",
+      "Default": "Wait for Step",
+      "Choices": [
+        {
+          "Next": "Terminate EMR Cluster",
+          "Condition": "{% ($states.input.State) = (\"COMPLETED\") %}"
+        },
+        {
+          "Next": "Stop EMR Cluster",
+          "Condition": "{% (($states.input.State) = (\"FAILED\") or ($states.input.State) = (\"CANCELLED\") or ($states.input.State) = (\"INTERRUPTED\") or ($states.input.State) = (\"CANCEL_PENDING\")) %}"
+        }
+      ],
+      "QueryLanguage": "JSONata"
+    },
+    "Stop EMR Cluster": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:terminateCluster",
+      "Next": "EMR Step Failed",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "ClusterId": "{% $states.input.ClusterId %}"
+      },
+      "Output": "{% $states.input %}"
     },
     "Products Not Processed": {
       "Type": "Task",
       "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::sns:publish",
       "Arguments": {
-        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
         "Message": "{% $states.input %}"
       },
       "Next": "Product DLQ Backup"
@@ -242,7 +473,7 @@
       "Arguments": {
         "DocumentName": "AWS-RunShellScript",
         "InstanceIds": [
-          "i-xxxxxxxxxxxxxxxxx"
+          "i-07126efdc8130b47e"
         ],
         "Parameters": {
           "workingDirectory": [
@@ -261,7 +492,8 @@
     "Wait for Product DLQ Backup": {
       "Type": "Wait",
       "Seconds": 15,
-      "Next": "Get Product DLQ Backup Status"
+      "Next": "Get Product DLQ Backup Status",
+      "QueryLanguage": "JSONata"
     },
     "Get Product DLQ Backup Status": {
       "Type": "Task",
@@ -299,8 +531,7 @@
       "Next": "Product DLQ Backup",
       "QueryLanguage": "JSONata",
       "Arguments": {
-        "InstanceId": "{% $states.input.InstanceId %}",
-        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
         "Message": "{% $states.input & '\n\nProduct DLQ Backup failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
       }
     },
@@ -312,7 +543,7 @@
       "Arguments": {
         "DocumentName": "AWS-RunShellScript",
         "InstanceIds": [
-          "{% $states.input.InstanceId %}"
+          "i-07126efdc8130b47e"
         ],
         "Parameters": {
           "workingDirectory": [
@@ -331,7 +562,8 @@
     "Wait for Map Backup": {
       "Type": "Wait",
       "Seconds": 15,
-      "Next": "Get Map Backup Status"
+      "Next": "Get Map Backup Status",
+      "QueryLanguage": "JSONata"
     },
     "Get Map Backup Status": {
       "Type": "Task",
@@ -353,7 +585,7 @@
       "Default": "Map Backup Failed",
       "Choices": [
         {
-          "Next": "Shutdown Containers",
+          "Next": "Shutdown DB Containers",
           "Condition": "{% ($states.input.Status) = (\"Success\") %}"
         },
         {
@@ -369,11 +601,11 @@
       "Next": "Map Backup",
       "QueryLanguage": "JSONata",
       "Arguments": {
-        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
         "Message": "{% $states.input & '\n\nMap backup failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
       }
     },
-    "Shutdown Containers": {
+    "Shutdown DB Containers": {
       "Type": "Task",
       "QueryLanguage": "JSONata",
       "Arguments": {
@@ -391,15 +623,16 @@
         }
       },
       "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
-      "Next": "Wait for Container Shutdown",
+      "Next": "Wait for DB Container Shutdown",
       "Output": {
         "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
       }
     },
-    "Wait for Container Shutdown": {
+    "Wait for DB Container Shutdown": {
       "Type": "Wait",
       "Seconds": 10,
-      "Next": "Stop DB EC2"
+      "Next": "Stop DB EC2",
+      "QueryLanguage": "JSONata"
     },
     "Stop DB EC2": {
       "Type": "Task",
@@ -415,7 +648,305 @@
     "Wait for Products": {
       "Type": "Wait",
       "Seconds": 120,
-      "Next": "Product SQS Poll"
+      "Next": "Product SQS Poll",
+      "QueryLanguage": "JSONata"
+    },
+    "Terminate EMR Cluster": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:terminateCluster",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "ClusterId": "{% $states.input.ClusterId %}"
+      },
+      "Next": "Wait for Druid EC2 Shutdown"
+    },
+    "Get Druid EC2 State": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+      "Next": "Check Druid EC2 State",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "InstanceIds": [
+          "i-0c7e5f521320434bd"
+        ]
+      },
+      "Output": {
+        "InstanceId": "{% $states.result.Reservations[0].Instances[0].InstanceId %}",
+        "State": "{% $states.result.Reservations[0].Instances[0].State.Name %}"
+      }
+    },
+    "Check Druid EC2 State": {
+      "Type": "Choice",
+      "Default": "Wait for Druid EC2 Shutdown",
+      "Choices": [
+        {
+          "Next": "Upgrade Druid EC2",
+          "Condition": "{% ($states.input.State) = (\"stopped\") %}"
+        },
+        {
+          "Next": "Shutdown Druid Containers",
+          "Condition": "{% ($states.input.State) = (\"running\") %}"
+        }
+      ],
+      "QueryLanguage": "JSONata"
+    },
+    "Shutdown Druid Containers": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "Next": "Wait for Druid Container Shutdown",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "DocumentName": "AWS-RunShellScript",
+        "InstanceIds": [
+          "{% $states.input.InstanceId %}"
+        ],
+        "Parameters": {
+          "workingDirectory": [
+            "/home/ec2-user/druid-cluster"
+          ],
+          "commands": [
+            "sudo -u ec2-user bash -c 'docker compose down'"
+          ]
+        }
+      },
+      "Output": {
+        "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+      }
+    },
+    "Wait for Druid Container Shutdown": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "Shutdown Druid EC2",
+      "QueryLanguage": "JSONata"
+    },
+    "EMR Step Failed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
+        "Message": "{% $states.input & '\n\nEMR Step failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
+      },
+      "Next": "Create EMR Cluster"
+    },
+    "Upgrade Druid EC2": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:modifyInstanceAttribute",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "InstanceId": "{% $states.input.InstanceId %}",
+        "InstanceType": {
+          "Value": "c5.4xlarge"
+        }
+      },
+      "Next": "Start Druid EC2",
+      "Output": {
+        "InstanceId": "{% $states.input.InstanceId %}"
+      }
+    },
+    "Start Druid EC2": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:startInstances",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "InstanceIds": [
+          "{% $states.input.InstanceId %}"
+        ]
+      },
+      "Output": {
+        "InstanceId": "{% $states.result.StartingInstances[0].InstanceId %}"
+      },
+      "Next": "Wait for Druid EC2 Start"
+    },
+    "Wait for Druid EC2 Start": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "QueryLanguage": "JSONata",
+      "Next": "Start Druid Containers"
+    },
+    "Start Druid Containers": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "DocumentName": "AWS-RunShellScript",
+        "InstanceIds": [
+          "{% $states.input.InstanceId %}"
+        ],
+        "Parameters": {
+          "workingDirectory": [
+            "/home/ec2-user/druid-cluster"
+          ],
+          "commands": [
+            "sudo -u ec2-user bash -c 'docker compose up -d'"
+          ]
+        }
+      },
+      "Output": {
+        "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+      },
+      "Next": "Wait for Druid Container Start"
+    },
+    "Wait for Druid Container Start": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "QueryLanguage": "JSONata",
+      "Next": "Run Druid ECS Task"
+    },
+    "Run Druid ECS Task": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "Cluster": "sentryhawk_ecs_cluster",
+        "TaskDefinition": "sentryhawk-cve-ingestion-druid:25",
+        "LaunchType": "FARGATE",
+        "PlatformVersion": "LATEST",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "Subnets": [
+              "subnet-0a896bf02807dd0c2"
+            ],
+            "SecurityGroups": [
+              "sg-058e7bc5c8813b46a"
+            ],
+            "AssignPublicIp": "ENABLED"
+          }
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Druid ECS Task Failed"
+        }
+      ],
+      "Next": "Stop Druid Containers"
+    },
+    "Stop Druid Containers": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "DocumentName": "AWS-RunShellScript",
+        "InstanceIds": [
+          "i-0c7e5f521320434bd"
+        ],
+        "Parameters": {
+          "workingDirectory": [
+            "/home/ec2-user/druid-cluster"
+          ],
+          "commands": [
+            "sudo -u ec2-user bash -c 'docker compose down'"
+          ]
+        }
+      },
+      "Output": {
+        "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+      },
+      "Next": "Wait for Druid Container Stop"
+    },
+    "Wait for Druid Container Stop": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "QueryLanguage": "JSONata",
+      "Next": "Stop Druid EC2"
+    },
+    "Stop Druid EC2": {
+      "Type": "Task",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "InstanceIds": [
+          "{% $states.input.InstanceId %}"
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
+      "Output": {
+        "InstanceId": "{% $states.result.StoppingInstances[0].InstanceId %}"
+      },
+      "Next": "Wait for Druid EC2 Stop"
+    },
+    "Wait for Druid EC2 Stop": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "QueryLanguage": "JSONata",
+      "Next": "Get Druid EC2 Status"
+    },
+    "Get Druid EC2 Status": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "InstanceIds": [
+          "{% $states.input.InstanceId %}"
+        ]
+      },
+      "Output": {
+        "InstanceId": "{% $states.result.Reservations[0].Instances[0].InstanceId %}",
+        "State": "{% $states.result.Reservations[0].Instances[0].State.Name %}"
+      },
+      "Next": "Check Druid EC2 Status"
+    },
+    "Check Druid EC2 Status": {
+      "Type": "Choice",
+      "Default": "Wait for Druid EC2 Stop",
+      "Choices": [
+        {
+          "Next": "Downgrade Druid EC2",
+          "Condition": "{% ($states.input.State) = (\"stopped\") %}"
+        }
+      ],
+      "QueryLanguage": "JSONata"
+    },
+    "Druid ECS Task Failed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
+        "Message": "{% $states.input & '\n\nDruid ECS task failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
+      },
+      "Next": "Run Druid ECS Task"
+    },
+    "Shutdown Druid EC2": {
+      "Type": "Task",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "InstanceIds": [
+          "i-0c7e5f521320434bd"
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
+      "Output": {
+        "InstanceId": "{% $states.result.StoppingInstances[0].InstanceId %}"
+      },
+      "Next": "Wait for Druid EC2 Shutdown"
+    },
+    "Downgrade Druid EC2": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:modifyInstanceAttribute",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "InstanceId": "{% $states.input.InstanceId %}",
+        "InstanceType": {
+          "Value": "m5.large"
+        }
+      },
+      "Output": {
+        "InstanceId": "{% $states.input.InstanceId %}"
+      },
+      "Next": "Run Success"
+    },
+    "Run Success": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "End": true,
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
+        "Message": "{% 'Sentryhawk Successfully Updated' %}"
+      }
     }
   }
 }
