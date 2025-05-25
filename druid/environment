@@ -37,8 +37,8 @@ druid_metadata_storage_connector_connectURI=jdbc:postgresql://postgres:5432/drui
 druid_metadata_storage_connector_user=druid
 druid_metadata_storage_connector_password=FoolishPassword
 
-druid_indexer_runner_javaOptsArray=["-server", "-Xmx1g", "-Xms1g", "-XX:MaxDirectMemorySize=3g", "-Duser.timezone=UTC", "-Dfile.encoding=UTF-8", "-Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager"]
-druid_indexer_fork_property_druid_processing_buffer_sizeBytes=256MiB
+# druid_indexer_runner_javaOptsArray=["-server", "-Xmx1g", "-Xms1g", "-XX:MaxDirectMemorySize=3g", "-Duser.timezone=UTC", "-Dfile.encoding=UTF-8", "-Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager"]
+# druid_indexer_fork_property_druid_processing_buffer_sizeBytes=256MiB
 
 druid_storage_type=local
 druid_storage_storageDirectory=/opt/shared/segments
@@ -53,7 +53,19 @@ DRUID_LOG4J=<?xml version="1.0" encoding="UTF-8" ?><Configuration status="WARN">
 # Historical needs more heap to load thousands of segments
 druid_historical_javaOptsArray=["-server", "-Xms8g", "-Xmx8g", "-XX:MaxDirectMemorySize=4g", "-Duser.timezone=UTC", "-Dfile.encoding=UTF-8"]
 
-# turn on automatic segment kills
-druid.coordinator.kill.enabled=true
-druid.coordinator.kill.on=true
-druid.coordinator.kill.durationToRetain=PT0S
+# Turn on automatic segment kills
+druid_coordinator_kill_enabled=true
+druid_coordinator_kill_on=true
+druid_coordinator_kill_durationtoretain=PT0S
+
+# Allow 8 concurrent indexing tasks
+druid_worker_capacity=8
+
+# JVM opts for each forked subtask
+druid_indexer_runner_javaoptsarray=["-server","-Xmx4g","-Xms4g","-XX:MaxDirectMemorySize=6g","-Duser.timezone=UTC","-Dfile.encoding=UTF-8","-Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager"]
+
+# Number of processing threads per subtask
+druid_indexer_fork_property_druid_processing_numthreads=2
+
+# In-memory buffer size per subtask
+druid_indexer_fork_property_druid_processing_buffer_sizebytes=1000000000

@@ -107,7 +107,7 @@
             "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
             "Arguments": {
               "Message": "{% $states.input & '\n\nDruid task failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}",
-              "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
+              "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic"
             },
             "Next": "Invoke Druid Task"
           },
@@ -130,7 +130,7 @@
       "Resource": "arn:aws:states:::lambda:invoke",
       "Output": "{% $states.result.Payload %}",
       "Arguments": {
-        "FunctionName": "arn:aws:lambda:us-east-2:692859941232:function:cve_ingestion_vendor_lambda:$LATEST",
+        "FunctionName": "arn:aws:lambda:us-east-2:${ACCOUNT_ID}:function:cve_ingestion_vendor_lambda:$LATEST",
         "Payload": "{% $states.input %}"
       },
       "Retry": [
@@ -163,7 +163,7 @@
       "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
       "Arguments": {
-        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
         "Message": "Vendor Lambda Failed. Resume the pipeline after fixing: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}"
       },
       "Next": "Invoke Vendor Lambda"
@@ -177,7 +177,7 @@
       "Type": "Task",
       "QueryLanguage": "JSONata",
       "Arguments": {
-        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_sqs",
+        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/${ACCOUNT_ID}/cve_ingestion_vendor_sqs",
         "AttributeNames": [
           "ApproximateNumberOfMessages",
           "ApproximateNumberOfMessagesNotVisible"
@@ -201,7 +201,7 @@
       "Type": "Task",
       "QueryLanguage": "JSONata",
       "Arguments": {
-        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_sqs_dlq",
+        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/${ACCOUNT_ID}/cve_ingestion_vendor_sqs_dlq",
         "AttributeNames": [
           "ApproximateNumberOfMessages",
           "ApproximateNumberOfMessagesNotVisible"
@@ -225,7 +225,7 @@
       "Type": "Task",
       "QueryLanguage": "JSONata",
       "Arguments": {
-        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_product_sqs",
+        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/${ACCOUNT_ID}/cve_ingestion_vendor_product_sqs",
         "AttributeNames": [
           "ApproximateNumberOfMessages",
           "ApproximateNumberOfMessagesNotVisible"
@@ -249,7 +249,7 @@
       "Type": "Task",
       "QueryLanguage": "JSONata",
       "Arguments": {
-        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/692859941232/cve_ingestion_vendor_product_sqs_dlq",
+        "QueueUrl": "https://sqs.us-east-2.amazonaws.com/${ACCOUNT_ID}/cve_ingestion_vendor_product_sqs_dlq",
         "AttributeNames": [
           "ApproximateNumberOfMessages",
           "ApproximateNumberOfMessagesNotVisible"
@@ -320,7 +320,7 @@
             "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
             "Arguments": {
               "Message": "{% $states.input & '\n\nGlue job failed. Resume the pipeline after fixing job: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}",
-              "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic"
+              "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic"
             },
             "Next": "Glue Job"
           },
@@ -336,7 +336,7 @@
       "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
       "Arguments": {
-        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
         "Message": "Product DLQ is not empty. Resume the pipeline after redrive: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}"
       },
       "Next": "Wait for Firehose"
@@ -351,7 +351,7 @@
       "QueryLanguage": "JSONata",
       "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
       "Arguments": {
-        "TopicArn": "arn:aws:sns:us-east-2:692859941232:cve_sns_topic",
+        "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
         "Message": "Vendor DLQ is not empty. Resume the pipeline after redrive: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}"
       },
       "Next": "Product SQS Poll"
