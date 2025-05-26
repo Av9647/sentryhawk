@@ -1,24 +1,11 @@
 import argparse
 from datetime import datetime, timedelta, timezone
-
-# parse command-line args
-parser = argparse.ArgumentParser(
-    prog="cve_pipeline",
-    description="Run the CVE pipeline in either backfill or incremental mode."
-)
-parser.add_argument(
-    "--run_type",
-    choices=["backfill", "incremental"],
-    default="backfill",
-    help="Which mode to run: full backfill or incremental (default: backfill)"
-)
-args, unknown = parser.parse_known_args()
-run_type = args.run_type
+from functools import reduce
 
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.functions import (
-    when, to_date, to_timestamp, year, month, col, countDistinct, sum_distinct, expr, 
-    lit, initcap, concat, round as spark_round, regexp_replace, trim, regexp_extract
+    when, to_date, to_timestamp, year, month, col, countDistinct, sum_distinct, expr, lit,
+    initcap, concat, round as spark_round, regexp_replace, trim, regexp_extract, row_number
 )
 from pyspark.sql.window import Window
 
@@ -54,7 +41,7 @@ spark = (
         .getOrCreate()
 )
 
-# Meta‑table & last‑run
+# Meta-table & last-run
 spark.sql(f"""
   CREATE TABLE IF NOT EXISTS {database}.cve_production_mv_meta (
     pipeline_name STRING,
@@ -62,6 +49,20 @@ spark.sql(f"""
   ) USING iceberg
   LOCATION 's3://cve-production/cve_production_tables/cve_production_mv_meta/'
 """)
+
+# parse command-line args
+parser = argparse.ArgumentParser(
+    prog="cve_pipeline",
+    description="Run the CVE pipeline in either backfill or incremental mode."
+)
+parser.add_argument(
+    "--run_type",
+    choices=["backfill", "incremental"],
+    default="backfill",
+    help="Which mode to run: full backfill or incremental (default: backfill)"
+)
+args, _ = parser.parse_known_args()
+run_type = args.run_type
 
 if run_type == "incremental":
     last_meta = (
@@ -77,7 +78,7 @@ else:
     print("Backfill mode: full rebuild")
 
 # Utils
-def round_col(c, scale): 
+def round_col(c, scale):
     return spark_round(c.cast("double"), scale)
 
 def compact_ts(c):
@@ -93,7 +94,7 @@ def clean_name(c):
 def transform_for_lookup(df):
     return (
         df.withColumn("chosenCvss", expr("""
-            CASE 
+            CASE
               WHEN cvssData IS NULL OR size(cvssData)=0 THEN named_struct(
                 'source','', 'type','', 'version','', 'vectorString','',
                 'baseScore',CAST(NULL AS DOUBLE),
@@ -240,8 +241,8 @@ if run_type == "backfill":
     )
     print(f"[DEBUG] base cached: {base.count()} rows")
 
-    # Lookup table
-    lookup_df = (
+    # Raw lookup
+    raw_lookup = (
         transform_for_lookup(base)
         .transform(lambda d: enrich_with_risk_flags(d))
         .select(
@@ -251,16 +252,55 @@ if run_type == "backfill":
             "datePublic","lastModified","year_published","date_published"
         )
     )
+
+    # Deduplicate only true duplicates
+    group_cols = ["vendor","product","cveId"]
+    # count non-null fields per row
+    meta_cols = [c for c in raw_lookup.columns if c not in group_cols]
+    completeness_expr = reduce(
+        lambda a, b: a + b,
+        [ when(col(c).isNotNull(), 1).otherwise(0) for c in meta_cols ]
+    )
+    scored = raw_lookup.withColumn("completeness", completeness_expr)
+
+    # find keys with >1 rows
+    dup_keys = (
+        scored
+        .groupBy(*group_cols)
+        .count()
+        .filter("count > 1")
+        .select(*group_cols)
+    )
+
+    # split into duplicates vs uniques
+    dup_rows = scored.join(dup_keys, group_cols, "inner")
+    non_dup  = scored.join(dup_keys, group_cols, "left_anti").drop("completeness")
+
+    # pick the single “most complete” row per duplicate key
+    w = Window.partitionBy(*group_cols).orderBy(col("completeness").desc())
+    deduped_dups = (
+        dup_rows
+          .withColumn("rn", row_number().over(w))
+          .filter(col("rn") == 1)
+          .drop("rn","completeness")
+    )
+
+    # final lookup table
+    lookup_df = non_dup.unionByName(deduped_dups)
+
+    # Write out the deduped lookup
     write_iceberg(
-        lookup_df, 
-        "cve_production_lookup", 
+        lookup_df,
+        "cve_production_lookup",
         "s3://cve-production/cve_production_tables/cve_production_lookup/",
         ["year_published","date_published"]
     )
 
     # Enrich base for aggregations
-    enriched = enrich_with_risk_flags(transform_for_lookup(base)) \
-                   .withColumn("weighted_score", weighted)
+    enriched = (
+        enrich_with_risk_flags(transform_for_lookup(base))
+        .withColumn("weighted_score", weighted)
+    )
 
     # Daily
     daily = (
