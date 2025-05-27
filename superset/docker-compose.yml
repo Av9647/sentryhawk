@@ -66,6 +66,11 @@ services:
       - .env
     environment:
       - SUPERSET_CONFIG_PATH=/etc/superset/superset_config.py
+      # Gunicorn tuning for m5.large
+      - SERVER_WORKER_AMOUNT=5           # 2 vCPU → (2*2)+1 = 5 workers
+      - SERVER_THREADS_AMOUNT=20         # threads per worker
+      - GUNICORN_TIMEOUT=120             # request timeout in seconds
+      # - GUNICORN_KEEPALIVE=2           # leave default or bump if you have many idle connections
     ports:
       - "8088:8088"                      # Expose Superset UI
     depends_on:
