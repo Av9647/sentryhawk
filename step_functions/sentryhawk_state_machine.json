@@ -331,7 +331,7 @@
         ],
         "ScaleDownBehavior": "TERMINATE_AT_TASK_COMPLETION",
         "AutoTerminationPolicy": {
-          "IdleTimeout": 3600
+          "IdleTimeout": 300
         }
       },
       "Next": "Wait for Cluster",
@@ -799,7 +799,7 @@
       "QueryLanguage": "JSONata",
       "Arguments": {
         "Cluster": "sentryhawk_ecs_cluster",
-        "TaskDefinition": "sentryhawk-cve-ingestion-druid:25",
+        "TaskDefinition": "sentryhawk-cve-ingestion-druid:30",
         "LaunchType": "FARGATE",
         "PlatformVersion": "LATEST",
         "NetworkConfiguration": {
