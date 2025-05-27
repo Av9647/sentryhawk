@@ -1,6 +1,5 @@
 import os
 import redis
-from flask_caching import Cache
 
 # -----------------------------------------------------------------------------
 # Database
