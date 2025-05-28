@@ -799,7 +799,7 @@
       "QueryLanguage": "JSONata",
       "Arguments": {
         "Cluster": "sentryhawk_ecs_cluster",
-        "TaskDefinition": "sentryhawk-cve-ingestion-druid:30",
+        "TaskDefinition": "sentryhawk-cve-ingestion-druid:31",
         "LaunchType": "FARGATE",
         "PlatformVersion": "LATEST",
         "NetworkConfiguration": {
