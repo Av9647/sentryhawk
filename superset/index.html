@@ -4,6 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Sentryhawk</title>
+
+  <!-- Shell-page favicons -->
+  <link rel="icon" href="/static/assets/images/Sentryhawk/favicon/favicon.ico" />
+  <link rel="icon" href="/static/assets/images/Sentryhawk/favicon/favicon-96x96.png" sizes="96x96" />
+  <link rel="apple-touch-icon" href="/static/assets/images/Sentryhawk/favicon/apple-touch-icon.png" sizes="180x180" />
+  <link rel="icon" href="/static/assets/images/Sentryhawk/favicon/favicon.svg" type="image/svg+xml" />
+
   <style>
     html, body {
       margin: 0;
@@ -17,10 +24,53 @@
     }
   </style>
 </head>
+
 <body>
-  <iframe
-    src="https://www.sentryhawk.org/superset/dashboard/2e01de8e-afed-4c24-86b3-89b33bb9f48e/?permalink_key=rdvWwZLNO5E&standalone=true"
-    allowfullscreen
-  ></iframe>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      // 1) Determine device
+      const mobileDashboard = "https://www.sentryhawk.org/superset/dashboard/e6d33a51-b326-42c9-aa0f-cb0e75644436/";
+      const desktopDashboard = "https://www.sentryhawk.org/superset/dashboard/2e01de8e-afed-4c24-86b3-89b33bb9f48e/";
+      const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+      const iframeSrc = isMobile ? mobileDashboard : desktopDashboard;
+
+      // 2) Determine color‐scheme
+      const prefersDark = window.matchMedia &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches;
+      const logoLight = "/static/assets/images/Sentryhawk/logo-light.png";
+      const logoDark  = "/static/assets/images/Sentryhawk/logo-dark.png";
+      const chosenLogo = prefersDark ? logoLight : logoDark;
+
+      // 3) Create and inject the iframe
+      const iframe = document.createElement("iframe");
+      iframe.src = iframeSrc;
+      iframe.id  = "sentryhawkFrame";
+      iframe.allowFullscreen = true;
+      document.body.appendChild(iframe);
+
+      // 4) When Superset loads, override its navbar logo & favicon
+      iframe.addEventListener("load", () => {
+        try {
+          const doc = iframe.contentDocument || iframe.contentWindow.document;
+
+          // Override the Superset navbar logo
+          const navLogo = doc.querySelector(".navbar-brand img");
+          if (navLogo) {
+            navLogo.src = chosenLogo;
+            navLogo.style.width = "220px";  // or whatever width you prefer
+            navLogo.style.height = "auto";
+          }
+
+          // Override the favicon inside the iframe, too
+          const linkIcons = doc.querySelectorAll('link[rel~="icon"]');
+          linkIcons.forEach(link => link.href = chosenLogo);
+
+        } catch (err) {
+          // Cross‐origin or timing issues will fail silently
+          console.warn("Logo override failed:", err);
+        }
+      });
+    });
+  </script>
 </body>
 </html>
