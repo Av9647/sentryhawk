@@ -15,6 +15,10 @@ x-superset-volumes: &superset-volumes
   - ./assets/images/Sentryhawk:/app/superset/static/assets/images/Sentryhawk:ro
   - ./assets/images/Sentryhawk/favicon/favicon.ico:/app/superset/favicon.ico:ro
   - ./assets:/app/pythonpath/superset/static/assets:ro
+  # Override default loading spinner
+  - ./assets/images/loading.gif:/app/superset/static/assets/images/loading.gif:ro
+  # Run command to find out hash string (loading.<hash>.gif): docker exec -it superset_app find /app -type f -name "loading*.gif"
+  - ./assets/images/loading.gif:/app/superset/static/assets/loading.cff8a5da.gif:ro
 
 services:
   # ---------------------------------------------------------------------
