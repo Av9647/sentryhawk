@@ -58,6 +58,7 @@ SESSION_REDIS = redis.StrictRedis(
 # Enable Anonymous Access in Superset
 # ---------------------------------------------------------------------
 PUBLIC_ROLE_LIKE = "Gamma"
+AUTH_TYPE = 2
 
 # ---------------------------------------------------------------------
 # Enable fine‑grained dashboard sharing
@@ -87,7 +88,75 @@ WEBDRIVER_BASEURL = "https://www.sentryhawk.org"
 # ---------------------------------------------------------------------
 HTTP_HEADERS = {
     "X-Frame-Options": "ALLOWALL",
-    "Content-Security-Policy": "frame-ancestors 'self' https://www.sentryhawk.org; " 
-                              "default-src 'self'; img-src 'self' data:; " 
+    "Content-Security-Policy": "frame-ancestors 'self' https://www.sentryhawk.org; "
+                              "default-src 'self'; img-src 'self' data:; "
                               "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
 }
+
+# -----------------------------------------------------------------------------
+# Branding
+# -----------------------------------------------------------------------------
+# The application name shown in the browser tab and top bar
+APP_NAME = "Sentryhawk"
+
+# Path to your logo (must live under static/assets/images/Sentryhawk/logo.png)
+APP_ICON = "/static/assets/images/Sentryhawk/logo.png"
+APP_ICON_WIDTH = 220
+
+# Where clicking the logo should take the user
+LOGO_TARGET_PATH = "/"
+
+# Hover tooltip for logo
+LOGO_TOOLTIP = "Sentryhawk"
+
+# (Optional) text to display next to logo—uncomment and edit if desired
+# LOGO_RIGHT_TEXT = "Your Department Name"
+
+# Favicon files (all must live under
+# static/assets/images/Sentryhawk/favicon/)
+FAVICONS = [
+    {"href": "/favicon.ico"},
+    {"href": "/static/assets/images/Sentryhawk/favicon/favicon.ico"},
+    {"href": "/static/assets/images/Sentryhawk/favicon/favicon-96x96.png", "sizes": "96x96"},
+    {"href": "/static/assets/images/Sentryhawk/favicon/apple-touch-icon.png", "sizes": "180x180"},
+    {"href": "/static/assets/images/Sentryhawk/favicon/favicon.svg", "type": "image/svg+xml"},
+]
+
+APP_EXTRA_CSS = ["/static/assets/custom-styling.css"]
+
+# -----------------------------------------------------------------------------
+# Custom Color Theme (override defaultTheme in superset-frontend)
+# -----------------------------------------------------------------------------
+# THEME_OVERRIDES = {
+#     "colors": {
+#         "text": {
+#             "label": "#879399",
+#             "help": "#737373",
+#         },
+#         "primary": {
+#             "base": "grey",
+#         },
+#         "secondary": {
+#             "base": "black",
+#         },
+#         "grayscale": {
+#             "base": "black",
+#         },
+#         "error": {
+#             "base": "orange",
+#         },
+#     },
+#     "typography": {
+#         "families": {
+#             "sansSerif": "Inter",
+#             "serif": "Georgia",
+#             "monospace": "Fira Code",
+#         },
+#         "weights": {
+#             "light": 200,
+#             "normal": 400,
+#             "medium": 500,
+#             "bold": 600,
+#         },
+#     },
+# }

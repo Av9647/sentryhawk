@@ -11,6 +11,10 @@ x-superset-volumes: &superset-volumes
   - ./superset_config.py:/etc/superset/superset_config.py:ro
   # 3) Persist Superset home (metadata, cache, logs)
   - superset_home:/app/superset_home
+  # 4) Mount your local ./assets so it appears under superset/static/assets/images
+  - ./assets/images/Sentryhawk:/app/superset/static/assets/images/Sentryhawk:ro
+  - ./assets/images/Sentryhawk/favicon/favicon.ico:/app/superset/favicon.ico:ro
+  - ./assets:/app/pythonpath/superset/static/assets:ro
 
 services:
   # ---------------------------------------------------------------------
