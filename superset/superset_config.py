@@ -58,7 +58,7 @@ SESSION_REDIS = redis.StrictRedis(
 # Enable Anonymous Access in Superset
 # ---------------------------------------------------------------------
 PUBLIC_ROLE_LIKE = "Gamma"
-AUTH_TYPE = 2
+SUPERSET_DASHBOARD_POSITION_DATA_LIMIT = 262144
 
 # ---------------------------------------------------------------------
 # Enable fine‑grained dashboard sharing

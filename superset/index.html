@@ -17,56 +17,137 @@
       height: 100%;
       overflow: hidden;
     }
+    /* Fixed header at top */
+    header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 50px;
+      background-color: #ffffff;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      z-index: 1000;
+    }
+    /* Placeholder for logo in header (we'll swap this in the script) */
+    #headerLogo {
+      height: 32px;
+      width: auto;
+    }
+    /* Support button styling */
+    #supportButton {
+      background-color: #FFDD00;
+      color: #000000;
+      border: none;
+      border-radius: 4px;
+      padding: 8px 14px;
+      text-decoration: none;
+      font-weight: bold;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    #supportButton:hover {
+      background-color: #e6c500;
+    }
+    /* The iframe sits below the 50px header */
     iframe {
       border: none;
+      position: absolute;
+      top: 50px;
+      left: 0;
       width: 100%;
-      height: 100%;
+      height: calc(100% - 50px);
     }
   </style>
 </head>
 
 <body>
+  <!-- 1) Fixed header with logo placeholder and support button -->
+  <header>
+    <!-- We’ll swap in the light/dark logo via JavaScript -->
+    <img src="/static/assets/images/Sentryhawk/logo-light.png"
+         alt="Sentryhawk"
+         id="headerLogo" />
+
+    <!-- Link to your Buy Me a Coffee page -->
+    <a id="supportButton"
+       href="https://buymeacoffee.com/sentryhawk"
+       target="_blank"
+       rel="noopener noreferrer">
+      ☕
+
+ Support
+    </a>
+  </header>
+
+  <!-- 2) Existing script that injects the Superset iframe and overrides logos/buttons inside it -->
   <script>
     document.addEventListener("DOMContentLoaded", () => {
-      // 1) Determine device
-      const mobileDashboard = "https://www.sentryhawk.org/superset/dashboard/e6d33a51-b326-42c9-aa0f-cb0e75644436/";
+      // 2a) Determine which dashboard to load (mobile vs desktop)
+      const mobileDashboard = "https://www.sentryhawk.org/superset/dashboard/e4ff830b-0097-467a-a9a0-d308fe46ebb9/";
       const desktopDashboard = "https://www.sentryhawk.org/superset/dashboard/2e01de8e-afed-4c24-86b3-89b33bb9f48e/";
       const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
       const iframeSrc = isMobile ? mobileDashboard : desktopDashboard;
 
-      // 2) Determine color‐scheme
+      // 2b) Determine light vs dark theme for header logo
       const prefersDark = window.matchMedia &&
         window.matchMedia("(prefers-color-scheme: dark)").matches;
       const logoLight = "/static/assets/images/Sentryhawk/logo-light.png";
       const logoDark  = "/static/assets/images/Sentryhawk/logo-dark.png";
       const chosenLogo = prefersDark ? logoLight : logoDark;
 
-      // 3) Create and inject the iframe
+      // 2c) Swap out header logo for chosen theme
+      const headerLogoImg = document.getElementById("headerLogo");
+      if (headerLogoImg) {
+        headerLogoImg.src = chosenLogo;
+      }
+
+      // 2d) Create and inject the iframe below the header
       const iframe = document.createElement("iframe");
       iframe.src = iframeSrc;
       iframe.id  = "sentryhawkFrame";
       iframe.allowFullscreen = true;
       document.body.appendChild(iframe);
 
-      // 4) When Superset loads, override its navbar logo & favicon
+      // 2e) Once the Superset iframe loads, override its navbar logo & hide login/settings
       iframe.addEventListener("load", () => {
         try {
           const doc = iframe.contentDocument || iframe.contentWindow.document;
 
-          // Override the Superset navbar logo
+          // Override the Superset navbar logo inside the iframe
           const navLogo = doc.querySelector(".navbar-brand img");
           if (navLogo) {
             navLogo.src = chosenLogo;
-            navLogo.style.width = "220px";  // or whatever width you prefer
+            navLogo.style.width = "220px";
             navLogo.style.height = "auto";
           }
 
-          // Override the favicon inside the iframe, too
+          // Override the favicon inside the iframe
           const linkIcons = doc.querySelectorAll('link[rel~="icon"]');
           linkIcons.forEach(link => link.href = chosenLogo);
 
+          // Hide any "Log In" links/buttons inside the iframe
+          const loginAnchor = doc.querySelector('a[href^="/login"]');
+          if (loginAnchor) loginAnchor.style.display = "none";
+          doc.querySelectorAll("button, li").forEach((el) => {
+            const txt = el.innerText.trim().toLowerCase();
+            if (txt === "log in" || txt === "login") {
+              el.style.display = "none";
+            }
+          });
+
+          // Hide any "Settings" entries inside the iframe
+          Array.from(doc.querySelectorAll("a, button, li")).forEach((el) => {
+            if (el.innerText.trim() === "Settings") {
+              el.style.display = "none";
+            }
+          });
+
         } catch (err) {
-          // Cross‐origin or timing issues will fail silently
+          // Cross-origin or timing issues will fail silently
           console.warn("Logo override failed:", err);
         }
       });
