@@ -4,9 +4,10 @@ from functools import reduce
 
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.functions import (
-    when, to_date, to_timestamp, year, month, col, countDistinct, sum_distinct, expr, lit,
-    initcap, concat, round as spark_round, regexp_replace, trim, regexp_extract, row_number
+    when, to_date, to_timestamp, year, month, current_date, col, countDistinct, sum as spark_sum, expr, lit,
+    initcap, ceil, concat, round as spark_round, regexp_replace, trim, regexp_extract, row_number, max as spark_max
 )
+from pyspark.sql.utils import AnalysisException
 from pyspark.sql.window import Window
 
 # Configuration
@@ -181,18 +182,114 @@ def enrich_with_risk_flags(df):
         ).otherwise(False))
     )
 
-# Risk-rating ranges derived from cve_threat_index_ranges.sql
-exprs = {
-    "daily_global":   lambda t: when(t.isNull(),"Unknown").when(t>9,"Critical").when(t>7,"High").when(t>4,"Moderate").when(t>1,"Low").otherwise("None"),
-    "daily_vendor":   lambda t: when(t.isNull(),"Unknown").when(t>7,"Critical").when(t>6,"High").when(t>4,"Moderate").when(t>1,"Low").otherwise("None"),
-    "daily_product":  lambda t: when(t.isNull(),"Unknown").when(t>7,"Critical").when(t>7,"High").when(t>5,"Moderate").when(t>1,"Low").otherwise("None"),
-    "monthly_global": lambda t: when(t.isNull(),"Unknown").when(t>244,"Critical").when(t>137,"High").when(t>95,"Moderate").when(t>1,"Low").otherwise("None"),
-    "monthly_vendor": lambda t: when(t.isNull(),"Unknown").when(t>10,"Critical").when(t>7,"High").when(t>4,"Moderate").when(t>1,"Low").otherwise("None"),
-    "monthly_product":lambda t: when(t.isNull(),"Unknown").when(t>11,"Critical").when(t>7,"High").when(t>5,"Moderate").when(t>1,"Low").otherwise("None"),
-    "ytd_global":     lambda t: when(t.isNull(),"Unknown").when(t>293,"Critical").when(t>236,"High").when(t>175,"Moderate").when(t>1,"Low").otherwise("None"),
-    "ytd_vendor":     lambda t: when(t.isNull(),"Unknown").when(t>10,"Critical").when(t>7,"High").when(t>5,"Moderate").when(t>1,"Low").otherwise("None"),
-    "ytd_product":    lambda t: when(t.isNull(),"Unknown").when(t>12,"Critical").when(t>8,"High").when(t>5,"Moderate").when(t>1,"Low").otherwise("None"),
-}
+# Define all nine (table_name, level_label) pairs:
+levels = [
+    ("cve_production_daily_global",   "daily_global"),
+    ("cve_production_daily_vendor",   "daily_vendor"),
+    ("cve_production_daily_product",  "daily_product"),
+    ("cve_production_monthly_global", "monthly_global"),
+    ("cve_production_monthly_vendor", "monthly_vendor"),
+    ("cve_production_monthly_product","monthly_product"),
+    ("cve_production_yearly_global",  "yearly_global"),
+    ("cve_production_yearly_vendor",  "yearly_vendor"),
+    ("cve_production_yearly_product", "yearly_product"),
+]
+
+# Helper to check whether thresholds table already exist
+def thresholds_table_exists():
+    try:
+        spark.table(f"{database}.cve_production_exposure_index_thresholds")
+        return True
+    except AnalysisException:
+        return False
+
+# On first‐ever run, dummy exprs returns "Unknown"
+if not thresholds_table_exists():
+    exprs = {
+        level_label: (lambda t: F.lit("Unknown"))
+        for (_, level_label) in levels
+    }
+
+    # Create an empty thresholds table schema
+    empty_schema = """
+        run_ts: timestamp, level: string, total_count: long, min_val: double,
+        p25: double, p50: double, p75: double, max_val: double, low_threshold: double,
+        med_threshold: double, high_threshold: double
+    """
+    empty_df = spark.createDataFrame([], schema=empty_schema)
+    empty_df.write.format("iceberg") \
+                 .mode("overwrite") \
+                 .saveAsTable(f"{database}.cve_production_exposure_index_thresholds")
+else:
+    stats_dfs = []
+    for table_name, level_label in levels:
+        # Read that level's exposure_index values
+        df_idx = (
+            spark.table(f"{database}.{table_name}")
+                    .select("exposure_index")
+                    .filter(col("exposure_index").isNotNull())
+        )
+
+        # Compute approximate percentiles [0.25, 0.50, 0.75]
+        pct_vals = df_idx.stat.approxQuantile("exposure_index", [0.25, 0.50, 0.75], 0.01)
+        p25, p50, p75 = pct_vals
+
+        # Compute min, max, and total_count
+        min_val = float(df_idx.agg({"exposure_index": "min"}).first()[0])
+        max_val = float(df_idx.agg({"exposure_index": "max"}).first()[0])
+        total_count = df_idx.count()
+
+        # Build a single‐row DataFrame for this level
+        row_df = spark.createDataFrame(
+            [(level_label, total_count, min_val, float(p25), float(p50), float(p75), max_val)],
+            schema="""
+                level: string, total_count: long, min_val: double,
+                p25: double, p50: double, p75: double, max_val: double
+            """
+        ).withColumn("low_threshold",  ceil(col("p25"))) \
+            .withColumn("med_threshold",  ceil(col("p50"))) \
+            .withColumn("high_threshold", ceil(col("p75"))) \
+            .withColumn("run_ts", lit(datetime.now(timezone.utc))) \
+            .select("run_ts", "level", "total_count", "min_val", "p25", "p50",
+                "p75", "max_val", "low_threshold", "med_threshold", "high_threshold")
+
+        stats_dfs.append(row_df)
+
+    # Union all nine levels into one DataFrame
+    thresholds_df = stats_dfs[0]
+    for df_part in stats_dfs[1:]:
+        thresholds_df = thresholds_df.unionByName(df_part)
+
+    # Write/overwrite into cve_production_exposure_index_thresholds (Iceberg)
+    thresholds_df.write.format("iceberg") \
+                        .mode("overwrite") \
+                        .saveAsTable(f"{database}.cve_production_exposure_index_thresholds")
+
+    # Read back the latest row for each level and build exprs[level] dynamically
+    th_df = spark.table(f"{database}.cve_production_exposure_index_thresholds")
+
+    # If you have multiple runs, pick only the latest timestamp per level:
+    latest_ts = th_df.agg(spark_max("run_ts").alias("max_run")).first()["max_run"]
+    latest_th = th_df.filter(col("run_ts") == lit(latest_ts))
+
+    # Build a Python dict of lambdas:  exprs["daily_vendor"] → appropriate when(…) chain
+    exprs = {}
+    for row in latest_th.collect():
+        level_label = row["level"]
+        lo_th       = row["low_threshold"]
+        md_th       = row["med_threshold"]
+        hi_th       = row["high_threshold"]
+
+        # Freeze those three values into default args
+        exprs[level_label] = (
+            lambda t, lo=lo_th, md=md_th, hi=hi_th:
+            when(t.isNull(), "Unknown")
+            .when(t > hi, "Critical")
+            .when(t > md, "High")
+            .when(t > lo, "Moderate")
+            .when(t > 1, "Low")
+            .otherwise("None")
+        )
 
 # Weighted score
 weighted = (
@@ -204,19 +301,55 @@ weighted = (
 )
 
 # Common aggregations
-def common_aggs(weight_col="weighted_score"):
+
+# "Product‐level" aggregation: Each CVE is distinct per (vendor, product)
+def common_aggs_product(weight_col="weighted_score"):
     return [
         countDistinct("cveId").alias("total_cves"),
-        round_col(sum_distinct(col(weight_col)), 2).alias("threat_index"),
+        round_col(spark_sum(col(weight_col)), 2).alias("exposure_index"),
         countDistinct(when(col("severity")=="Critical", col("cveId"))).alias("critical_count"),
         countDistinct(when(col("severity")=="High",     col("cveId"))).alias("high_count"),
         countDistinct(when(col("severity")=="Medium",   col("cveId"))).alias("medium_count"),
         countDistinct(when(col("severity")=="Low",      col("cveId"))).alias("low_count"),
-        round_col(sum_distinct(when(col("is_network_based"), col(weight_col))),2).alias("network_threat_index"),
+        round_col(spark_sum(when(col("is_network_based"), col(weight_col))),2).alias("network_exposure_index"),
         countDistinct(when(col("is_network_based"), col("cveId"))).alias("network_cves"),
-        countDistinct(when(col("is_no_ui"),    col("cveId"))).alias("no_ui_cves"),
-        countDistinct(when(col("is_low_priv"),col("cveId"))).alias("low_priv_cves"),
+        countDistinct(when(col("is_no_ui"),          col("cveId"))).alias("no_ui_cves"),
+        countDistinct(when(col("is_low_priv"),       col("cveId"))).alias("low_priv_cves"),
         countDistinct(when(col("is_fully_critical"), col("cveId"))).alias("fully_critical_cves"),
+    ]
+
+# "Vendor‐level" aggregation: Treat each (cve, product) as a distinct incident
+def common_aggs_vendor(weight_col="weighted_score"):
+    # Create a synthetic key cve_product = concat(cveId,"|",product) to groupBy("vendor")
+    return [
+        countDistinct(concat(col("cveId"), lit("|"), col("product"))).alias("total_cves"),
+        round_col(spark_sum(col(weight_col)), 2).alias("exposure_index"),
+        countDistinct(when(col("severity")=="Critical", concat(col("cveId"), lit("|"), col("product")))).alias("critical_count"),
+        countDistinct(when(col("severity")=="High", concat(col("cveId"), lit("|"), col("product")))).alias("high_count"),
+        countDistinct(when(col("severity")=="Medium", concat(col("cveId"), lit("|"), col("product")))).alias("medium_count"),
+        countDistinct(when(col("severity")=="Low", concat(col("cveId"), lit("|"), col("product")))).alias("low_count"),
+        round_col(spark_sum(when(col("is_network_based"), col(weight_col))),2).alias("network_exposure_index"),
+        countDistinct(when(col("is_network_based"), concat(col("cveId"), lit("|"), col("product")))).alias("network_cves"),
+        countDistinct(when(col("is_no_ui"), concat(col("cveId"), lit("|"), col("product")))).alias("no_ui_cves"),
+        countDistinct(when(col("is_low_priv"), concat(col("cveId"), lit("|"), col("product")))).alias("low_priv_cves"),
+        countDistinct(when(col("is_fully_critical"), concat(col("cveId"), lit("|"), col("product")))).alias("fully_critical_cves"),
+        countDistinct(col("product")).alias("affected_products")
+    ]
+
+# "Global‐level" aggregation: Count each (cve, vendor, product) combination as a separate "incident"
+def common_aggs_global(weight_col="weighted_score"):
+    return [
+        countDistinct(concat(col("cveId"), lit("|"), col("vendor"), lit("|"), col("product"))).alias("total_cves"),
+        round_col(spark_sum(col(weight_col)), 2).alias("exposure_index"),
+        countDistinct(when(col("severity")=="Critical", concat(col("cveId"), lit("|"), col("vendor"), lit("|"), col("product")))).alias("critical_count"),
+        countDistinct(when(col("severity")=="High", concat(col("cveId"), lit("|"), col("vendor"), lit("|"), col("product")))).alias("high_count"),
+        countDistinct(when(col("severity")=="Medium", concat(col("cveId"), lit("|"), col("vendor"), lit("|"), col("product")))).alias("medium_count"),
+        countDistinct(when(col("severity")=="Low", concat(col("cveId"), lit("|"), col("vendor"), lit("|"), col("product")))).alias("low_count"),
+        round_col(spark_sum(when(col("is_network_based"), col(weight_col))),2).alias("network_exposure_index"),
+        countDistinct(when(col("is_network_based"), concat(col("cveId"), lit("|"), col("vendor"), lit("|"), col("product")))).alias("network_cves"),
+        countDistinct(when(col("is_no_ui"), concat(col("cveId"), lit("|"), col("vendor"), lit("|"), col("product")))).alias("no_ui_cves"),
+        countDistinct(when(col("is_low_priv"), concat(col("cveId"), lit("|"), col("vendor"), lit("|"), col("product")))).alias("low_priv_cves"),
+        countDistinct(when(col("is_fully_critical"), concat(col("cveId"), lit("|"), col("vendor"), lit("|"), col("product")))).alias("fully_critical_cves"),
     ]
 
 # Write helper
@@ -276,7 +409,7 @@ if run_type == "backfill":
     dup_rows = scored.join(dup_keys, group_cols, "inner")
     non_dup  = scored.join(dup_keys, group_cols, "left_anti").drop("completeness")
 
-    # pick the single “most complete” row per duplicate key
+    # pick the single "most complete" row per duplicate key
     w = Window.partitionBy(*group_cols).orderBy(col("completeness").desc())
     deduped_dups = (
         dup_rows
@@ -286,7 +419,7 @@ if run_type == "backfill":
     )
 
     # final lookup table
-    lookup_df = non_dup.unionByName(deduped_dups)
+    lookup_df = non_dup.unionByName(deduped_dups).repartition(NUM_OUT, "year_published")
 
     # Write out the deduped lookup
     write_iceberg(
@@ -296,19 +429,20 @@ if run_type == "backfill":
         ["year_published","date_published"]
     )
 
-    # Enrich base for aggregations
+    # Enrich lookup for aggregations
+    lookup = spark.table(f"{database}.cve_production_lookup")
     enriched = (
-        enrich_with_risk_flags(transform_for_lookup(base))
+        enrich_with_risk_flags(lookup)
         .withColumn("weighted_score", weighted)
     )
 
     # Daily
     daily = (
         enriched.groupBy("datePublished","year_published")
-                .agg(*common_aggs())
+                .agg(*common_aggs_global())
                 .withColumn("vendor", lit(None).cast("string"))
                 .withColumn("product", lit(None).cast("string"))
-                .withColumn("risk_rating", exprs["daily_global"](col("threat_index")))
+                .withColumn("exposure_rating", exprs["daily_global"](col("exposure_index")))
                 .withColumn("date_published", to_date(col("datePublished")))
     )
     write_iceberg(
@@ -320,9 +454,9 @@ if run_type == "backfill":
 
     daily_vendor = (
         enriched.groupBy("vendor","datePublished","year_published")
-                .agg(*common_aggs())
+                .agg(*common_aggs_vendor())
                 .withColumn("product", lit(None).cast("string"))
-                .withColumn("risk_rating", exprs["daily_vendor"](col("threat_index")))
+                .withColumn("exposure_rating", exprs["daily_vendor"](col("exposure_index")))
                 .withColumn("date_published", to_date(col("datePublished")))
     )
     write_iceberg(
@@ -334,8 +468,8 @@ if run_type == "backfill":
 
     daily_prod = (
         enriched.groupBy("vendor","product","datePublished","year_published")
-                .agg(*common_aggs())
-                .withColumn("risk_rating", exprs["daily_product"](col("threat_index")))
+                .agg(*common_aggs_product())
+                .withColumn("exposure_rating", exprs["daily_product"](col("exposure_index")))
                 .withColumn("date_published", to_date(col("datePublished")))
     )
     write_iceberg(
@@ -354,9 +488,14 @@ if run_type == "backfill":
     ]:
         dfm = (
             monthly_en.groupBy(*dims)
-                      .agg(*common_aggs())
-                      .withColumn("risk_rating", exprs[expr_key](col("threat_index")))
-                      .withColumn("month_date", to_date(expr(f"make_date(year_published,month_published,1)")))
+            .agg(
+                *(
+                    common_aggs_global()
+                    if lvl == "global"
+                    else (common_aggs_vendor() if lvl == "vendor" else common_aggs_product())
+                    ))
+                    .withColumn("exposure_rating", exprs[expr_key](col("exposure_index")))
+                    .withColumn("month_date", to_date(expr(f"make_date(year_published,month_published,1)")))
         )
         write_iceberg(
             dfm,
@@ -365,16 +504,21 @@ if run_type == "backfill":
             ["year_published","month_published"]
         )
 
-    # YTD
+    # Yearly
     for lvl, dims, expr_key, suffix in [
-        ("global",  ["year_published"], "ytd_global", "cve_production_ytd_global"),
-        ("vendor",  ["vendor","year_published"], "ytd_vendor", "cve_production_ytd_vendor"),
-        ("product", ["vendor","product","year_published"], "ytd_product","cve_production_ytd_product"),
+        ("global",  ["year_published"], "yearly_global", "cve_production_yearly_global"),
+        ("vendor",  ["vendor","year_published"], "yearly_vendor", "cve_production_yearly_vendor"),
+        ("product", ["vendor","product","year_published"], "yearly_product","cve_production_yearly_product"),
     ]:
         dfy = (
             enriched.groupBy(*dims)
-                    .agg(*common_aggs())
-                    .withColumn("risk_rating", exprs[expr_key](col("threat_index")))
+            .agg(
+                *(
+                    common_aggs_global()
+                    if lvl == "global"
+                    else (common_aggs_vendor() if lvl == "vendor" else common_aggs_product())
+                    ))
+                    .withColumn("exposure_rating", exprs[expr_key](col("exposure_index")))
                     .withColumn("year_date", to_date(expr("make_date(year_published,1,1)")))
         )
         write_iceberg(
@@ -384,17 +528,119 @@ if run_type == "backfill":
             ["year_published"]
         )
 
+    # TRAILING 12‐MONTH & TRAILING 1‐MONTH AGGREGATIONS (Vendor & Product)
+
+    # Compute the "cutoff" timestamps for 12 months ago and 1 month ago (UTC):
+    cutoff_12mo = datetime.now(timezone.utc) - timedelta(days=365)
+    cutoff_1mo  = datetime.now(timezone.utc) - timedelta(days=30)
+
+    # Convert to Spark timestamps so we can filter:
+    cutoff_12mo_ts = F.to_timestamp(lit(cutoff_12mo.strftime("%Y-%m-%dT%H:%M:%S")))
+    cutoff_1mo_ts  = F.to_timestamp(lit(cutoff_1mo.strftime("%Y-%m-%dT%H:%M:%S")))
+
+    # A) Trailing 12 Months – Vendor Level
+    trailing_12mo_vendor = (
+        enriched
+        .filter(col("datePublished") >= cutoff_12mo_ts)
+        .groupBy("vendor")
+        .agg(*common_aggs_vendor())
+        .withColumn("exposure_rating", exprs["yearly_vendor"](col("exposure_index")))
+        .withColumn(
+            "window_start",
+            to_date(lit(cutoff_12mo.strftime("%Y-%m-%d")))  # start date of the 12‐mo window
+        )
+        .withColumn(
+            "window_end",
+            current_date()  # "today"
+        )
+    )
+    write_iceberg(
+        trailing_12mo_vendor,
+        "cve_production_trailing_12mo_vendor",
+        "s3://cve-production/cve_production_tables/cve_production_trailing_12mo_vendor/",
+        [],  # no partition columns (one row per vendor in a single table)
+    )
+
+    # B) Trailing 12 Months – Product Level
+    trailing_12mo_product = (
+        enriched
+        .filter(col("datePublished") >= cutoff_12mo_ts)
+        .groupBy("vendor", "product")
+        .agg(*common_aggs_product())
+        .withColumn("exposure_rating", exprs["yearly_product"](col("exposure_index")))
+        .withColumn(
+            "window_start",
+            to_date(lit(cutoff_12mo.strftime("%Y-%m-%d")))
+        )
+        .withColumn(
+            "window_end",
+            current_date()
+        )
+    )
+    write_iceberg(
+        trailing_12mo_product,
+        "cve_production_trailing_12mo_product",
+        "s3://cve-production/cve_production_tables/cve_production_trailing_12mo_product/",
+        [],
+    )
+
+    # C) Trailing 1 Month – Vendor Level
+    trailing_1mo_vendor = (
+        enriched
+        .filter(col("datePublished") >= cutoff_1mo_ts)
+        .groupBy("vendor")
+        .agg(*common_aggs_vendor())
+        .withColumn("exposure_rating", exprs["yearly_vendor"](col("exposure_index")))
+        .withColumn(
+            "window_start",
+            to_date(lit(cutoff_1mo.strftime("%Y-%m-%d")))
+        )
+        .withColumn(
+            "window_end",
+            current_date()
+        )
+    )
+    write_iceberg(
+        trailing_1mo_vendor,
+        "cve_production_trailing_1mo_vendor",
+        "s3://cve-production/cve_production_tables/cve_production_trailing_1mo_vendor/",
+        [],
+    )
+
+    # D) Trailing 1 Month – Product Level
+    trailing_1mo_product = (
+        enriched
+        .filter(col("datePublished") >= cutoff_1mo_ts)
+        .groupBy("vendor", "product")
+        .agg(*common_aggs_product())
+        .withColumn("exposure_rating", exprs["yearly_product"](col("exposure_index")))
+        .withColumn(
+            "window_start",
+            to_date(lit(cutoff_1mo.strftime("%Y-%m-%d")))
+        )
+        .withColumn(
+            "window_end",
+            current_date()
+        )
+    )
+    write_iceberg(
+        trailing_1mo_product,
+        "cve_production_trailing_1mo_product",
+        "s3://cve-production/cve_production_tables/cve_production_trailing_1mo_product/",
+        [],
+    )
+
     # Running totals
     for lvl, partition, expr_key, suffix in [
-        ("global",  [], "ytd_global", "cve_production_daily_global_running"),
-        ("vendor",  ["vendor"], "ytd_vendor", "cve_production_daily_vendor_running"),
-        ("product", ["vendor","product"], "ytd_product", "cve_production_daily_product_running"),
+        ("global",  [], "yearly_global", "cve_production_daily_global_running"),
+        ("vendor",  ["vendor"], "yearly_vendor", "cve_production_daily_vendor_running"),
+        ("product", ["vendor","product"], "yearly_product", "cve_production_daily_product_running"),
     ]:
         w = Window.partitionBy(*partition).orderBy("datePublished").rowsBetween(Window.unboundedPreceding, Window.currentRow)
         dfr = (
             spark.table(f"{database}.cve_production_daily_{lvl}")
-                 .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(w),2))
-                 .withColumn("running_risk_rating", exprs[expr_key](col("cumulative_threat_index")))
+                 .withColumn("cumulative_exposure_index", round_col(F.sum("exposure_index").over(w),2))
+                 .withColumn("running_exposure_rating", exprs[expr_key](col("cumulative_exposure_index")))
         )
         write_iceberg(
             dfr,
@@ -424,12 +670,16 @@ if run_type == "backfill":
         "cve_production_monthly_global",
         "cve_production_monthly_vendor",
         "cve_production_monthly_product",
-        "cve_production_ytd_global",
-        "cve_production_ytd_vendor",
-        "cve_production_ytd_product",
+        "cve_production_yearly_global",
+        "cve_production_yearly_vendor",
+        "cve_production_yearly_product",
         "cve_production_daily_global_running",
         "cve_production_daily_vendor_running",
         "cve_production_daily_product_running",
+        "cve_production_trailing_12mo_vendor",
+        "cve_production_trailing_12mo_product",
+        "cve_production_trailing_1mo_vendor",
+        "cve_production_trailing_1mo_product",
         "cve_production_mv_meta"
     ]
 
@@ -466,10 +716,11 @@ elif run_type == "incremental":
              .filter("currentFlag = true")
     )
     updates = (
-        enrich_with_risk_flags(transform_for_lookup(updates_base))
+        transform_for_lookup(updates_base)
+        .transform(lambda d: enrich_with_risk_flags(d))
         .withColumn("year_published", year(col("datePublished")))
         .withColumn("date_published", to_date(col("datePublished")))
-        )
+    )
     
     # Deduplicate on the composite key, keeping only the row with the latest validFrom
     dedupe_win = Window.partitionBy("cveId", "vendor", "product") \
@@ -512,8 +763,13 @@ elif run_type == "incremental":
         df_agg = (
             df.withColumn("weighted_score", weighted)
             .groupBy(*dims, "datePublished")
-            .agg(*common_aggs())
-            .withColumn("risk_rating", exprs[expr_key](col("threat_index")))
+            .agg(
+                *(
+                    common_aggs_global()
+                    if level == "global"
+                    else (common_aggs_vendor() if level == "vendor" else common_aggs_product())
+                    ))
+            .withColumn("exposure_rating", exprs[expr_key](col("exposure_index")))
             .withColumn("year_published", year(col("datePublished")))
             .withColumn("date_published", to_date(col("datePublished")))
         )
@@ -553,8 +809,13 @@ elif run_type == "incremental":
         ]:
             mon_agg = (
                 mon_df.groupBy(*dims)
-                      .agg(*common_aggs())
-                      .withColumn("risk_rating", exprs[expr_key](col("threat_index")))
+                .agg(
+                    *(
+                        common_aggs_global()
+                        if lvl == "global"
+                        else (common_aggs_vendor() if lvl == "vendor" else common_aggs_product())
+                        ))
+                      .withColumn("exposure_rating", exprs[expr_key](col("exposure_index")))
                       .withColumn("month_date", to_date(expr("make_date(year_published,month_published,1)")))
             )
             write_iceberg(
@@ -566,45 +827,17 @@ elif run_type == "incremental":
                 dynamic=True
             )
 
-    # Overwrite impacted YTD partitions
-    year_list = [r.y for r in updates_unique.select(year(col("datePublished")).alias("y")).distinct().collect()]
-    for y in year_list:
-        ytd_df = (
-            spark.table(f"{database}.cve_production_lookup")
-                 .filter(year(col("datePublished"))==y)
-                 .transform(lambda df: enrich_with_risk_flags(df))
-        )
-        for lvl, dims, expr_key, suffix in [
-            ("global",  ["year_published"], "ytd_global", "cve_production_ytd_global"),
-            ("vendor",  ["vendor","year_published"], "ytd_vendor", "cve_production_ytd_vendor"),
-            ("product", ["vendor","product","year_published"], "ytd_product","cve_production_ytd_product"),
-        ]:
-            ytd_agg = (
-                ytd_df.groupBy(*dims)
-                      .agg(*common_aggs())
-                      .withColumn("risk_rating", exprs[expr_key](col("threat_index")))
-                      .withColumn("year_date", to_date(expr("make_date(year_published,1,1)")))
-            )
-            write_iceberg(
-                ytd_agg,
-                suffix,
-                f"s3://cve-production/cve_production_tables/{suffix}/",
-                ["year_published"],
-                mode="overwrite",
-                dynamic=True
-            )
-
-    # Rebuild running totals (full overwrite)
+    # Rebuild running totals
     for lvl, partition, expr_key, suffix in [
-        ("global",  [], "ytd_global", "cve_production_daily_global_running"),
-        ("vendor",  ["vendor"], "ytd_vendor", "cve_production_daily_vendor_running"),
-        ("product", ["vendor","product"], "ytd_product", "cve_production_daily_product_running"),
+        ("global",  [], "yearly_global", "cve_production_daily_global_running"),
+        ("vendor",  ["vendor"], "yearly_vendor", "cve_production_daily_vendor_running"),
+        ("product", ["vendor","product"], "yearly_product", "cve_production_daily_product_running"),
     ]:
         w = Window.partitionBy(*partition).orderBy("datePublished").rowsBetween(Window.unboundedPreceding, Window.currentRow)
         run_df = (
             spark.table(f"{database}.cve_production_daily_{lvl}")
-                 .withColumn("cumulative_threat_index", round_col(F.sum("threat_index").over(w),2))
-                 .withColumn("running_risk_rating", exprs[expr_key](col("cumulative_threat_index")))
+                 .withColumn("cumulative_exposure_index", round_col(F.sum("exposure_index").over(w),2))
+                 .withColumn("running_exposure_rating", exprs[expr_key](col("cumulative_exposure_index")))
         )
         write_iceberg(
             run_df, suffix, f"s3://cve-production/cve_production_tables/{suffix}/", ["year_published","date_published"],
