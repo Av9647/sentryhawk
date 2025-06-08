@@ -799,7 +799,7 @@
       "QueryLanguage": "JSONata",
       "Arguments": {
         "Cluster": "sentryhawk_ecs_cluster",
-        "TaskDefinition": "sentryhawk-cve-ingestion-druid:35",
+        "TaskDefinition": "sentryhawk-cve-ingestion-druid:37",
         "LaunchType": "FARGATE",
         "PlatformVersion": "LATEST",
         "NetworkConfiguration": {
@@ -819,10 +819,21 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "Druid ECS Task Failed"
+          "Next": "Halt Druid EC2"
         }
       ],
       "Next": "Stop Druid Containers"
+    },
+    "Halt Druid EC2": {
+      "Type": "Task",
+      "QueryLanguage": "JSONata",
+      "Arguments": {
+        "InstanceIds": [
+          "i-0c7e5f521320434bd"
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
+      "Next": "Druid ECS Task Failed"
     },
     "Stop Druid Containers": {
       "Type": "Task",
@@ -905,7 +916,7 @@
       "QueryLanguage": "JSONata",
       "Arguments": {
         "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
-        "Message": "{% $states.input & '\n\nDruid ECS task failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
+        "Message": "{% 'Druid ECS task failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
       },
       "Next": "Run Druid ECS Task"
     },
