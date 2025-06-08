@@ -5,7 +5,7 @@ set -eux
 SPARK_JAR_DIR=/usr/lib/spark/jars
 
 # 2) S3 bucket/path where you uploaded your jars
-S3_BASE=s3://cve-code/emr
+S3_BASE=s3://cve-code/emr/jars
 
 # 3) List of jars to install
 JARS=(
