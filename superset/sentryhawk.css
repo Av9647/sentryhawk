@@ -1,0 +1,4 @@
+/* Hide the entire out-of-scope collapse wrapper */
+.ant-collapse.ant-collapse-icon-position-right.ant-collapse-ghost {
+    display: none !important;
+}
