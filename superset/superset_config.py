@@ -122,8 +122,6 @@ FAVICONS = [
     {"href": "/static/assets/images/Sentryhawk/favicon/favicon.svg", "type": "image/svg+xml"},
 ]
 
-APP_EXTRA_CSS = ["/static/assets/custom-styling.css"]
-
 # -----------------------------------------------------------------------------
 # Custom Color Theme (override defaultTheme in superset-frontend)
 # -----------------------------------------------------------------------------
