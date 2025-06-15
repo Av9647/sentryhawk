@@ -1,0 +1,67 @@
+{
+  "Name": "Block_DirectNav_ExceptRoot",
+  "Priority": 1,
+  "Statement": {
+    "AndStatement": {
+      "Statements": [
+        {
+          "ByteMatchStatement": {
+            "SearchString": "navigate",
+            "FieldToMatch": {
+              "SingleHeader": {
+                "Name": "sec-fetch-mode"
+              }
+            },
+            "TextTransformations": [
+              {
+                "Priority": 0,
+                "Type": "NONE"
+              }
+            ],
+            "PositionalConstraint": "EXACTLY"
+          }
+        },
+        {
+          "ByteMatchStatement": {
+            "SearchString": "none",
+            "FieldToMatch": {
+              "SingleHeader": {
+                "Name": "sec-fetch-site"
+              }
+            },
+            "TextTransformations": [
+              {
+                "Priority": 0,
+                "Type": "NONE"
+              }
+            ],
+            "PositionalConstraint": "EXACTLY"
+          }
+        },
+        {
+          "SizeConstraintStatement": {
+            "FieldToMatch": {
+              "UriPath": {}
+            },
+            "ComparisonOperator": "GE",
+            "Size": 2,
+            "TextTransformations": [
+              {
+                "Priority": 0,
+                "Type": "NONE"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "Action": {
+    "Block": {}
+  },
+  "VisibilityConfig": {
+    "SampledRequestsEnabled": true,
+    "CloudWatchMetricsEnabled": true,
+    "MetricName": "Block_DirectNav_ExceptRoot"
+  }
+}
