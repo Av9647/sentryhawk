@@ -28,11 +28,11 @@ The deployed Sentryhawk pipeline is fully managed in AWS and consists of these s
 
 1. **Trigger & Orchestration (EventBridge + Step Functions)**: An Amazon EventBridge scheduled rule (cron) triggers the data pipeline at fixed intervals. This invokes an AWS Step Functions state machine, which orchestrates all downstream processing. Step Functions handles sequencing, retry logic, and error handling for the entire workflow.
 
-  ![Sentryhawk Architecture](assets/high_level.png)
+    ![Sentryhawk Architecture](assets/high_level.png)
 
 2. **Change Data Capture Engine (CDC)**: At the start of each run, the pipeline uses AWS Systems Manager to start an EC2 backend server. This instance runs Docker containers for MongoDB and a CVE-search service. A script on the instance fetches the latest CVE data from the NVD API and the cvelistV5 GitHub repository. A MongoDB map-diff process then determines which vendor–product combinations have new, removed, or changed CVEs. These differences are sent as messages to an Amazon SQS Product Queue. If any tasks fail to process, they go to a dead-letter queue. Unprocessed items in the DLQ are logged and an SNS alert is sent to administrator.
 
-  ![Scalable Ingestion](assets/ingestion.png)
+    ![Scalable Ingestion](assets/ingestion.png)
 
 3. **Scalable Ingestion (SQS + Lambda)**: Messages in the SQS queue drive the ingestion of product JSON data. AWS Lambda functions take each vendor–product message and call the external Vulnerability Lookup API to retrieve detailed CVE JSON data for that vendor/product. The raw JSON results are stored in an S3 ingestion bucket.
 
@@ -47,11 +47,11 @@ The deployed Sentryhawk pipeline is fully managed in AWS and consists of these s
 
 5. **Materialized Views (Amazon EMR)**: After the production data is updated, the Step Function launches an Amazon EMR Spark cluster. This cluster computes pre-aggregated materialized views (for example, aggregations of CVSS scores by vendor/product, exposure indices, etc.) using Spark. The resulting views in parquet are written to S3. The EMR cluster then terminates automatically to minimize cost.
 
-  ![Data Processing](assets/processing.png)
+    ![Data Processing](assets/processing.png)
 
 6. **Analytics Update (Druid & ECS)**: Finally, the pipeline refreshes the analytics layer. The EC2 instance hosting Apache Druid is scaled up. A containerized ingestion task runs on Amazon ECS using a Docker image from Amazon ECR to load the new materialized views into Druid. Once the fresh data is ingested, the EC2 analytics server is scaled back down. This ensures that the Apache Superset dashboards always query up-to-date data with low latency.
 
-  ![Analytics and Visualization](assets/analytics.png)
+    ![Analytics and Visualization](assets/analytics.png)
 
 Throughout the pipeline, Amazon SNS and CloudWatch provide monitoring and alerting. Any step failure triggers an SNS alert so administrators can investigate, ensuring reliability and transparency.
 
@@ -74,7 +74,7 @@ The Sentryhawk repository includes all configuration and code needed for deploym
     chmod +x ~/.docker/cli-plugins/docker-compose
     ```
 
-    Also obtain an NVD API key (from https://nvd.nist.gov/developers/request-an-api-key) for the CIRCL CVE search component.
+    Also obtain an NVD API key from https://nvd.nist.gov/developers/request-an-api-key for the CIRCL CVE search component.
 
 2. **Configure Environment**: Clone the CVE-Search pipeline repo:
 
@@ -137,7 +137,7 @@ The Sentryhawk repository includes all configuration and code needed for deploym
     docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/sentryhawk_repo:cve-ingestion-druid
     ```
 
-    (Adjust <REGION> and <ACCOUNT_ID> for your AWS account.). Next, run this image as a task on ECS to ingest the materialized views into Apache Druid.
+    Adjust <REGION> and <ACCOUNT_ID> for your AWS account. Next, run this image as a task on ECS to ingest the materialized views into Apache Druid.
 
 7. **Configure Superset**: Launch a PostgreSQL RDS instance for Superset’s metadata. In your Docker setup, place superset_config.py (customized for the RDS host and credentials) alongside the docker-compose.yml. In .env, set the DATABASE_ variables to point Superset at the RDS (for example, DATABASE_HOST, DATABASE_USER, etc.). Then run Superset and Redis via Docker:
 
