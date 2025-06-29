@@ -4,6 +4,14 @@
 
 Sentryhawk is a cloud-native cybersecurity intelligence platform that aggregates and enriches public vulnerability (CVE) data from multiple feeds. It computes a cumulative Exposure Index (an aggregated CVSS-based score) to highlight where software flaws are clustering. By turning scattered threat data into structured, continuously updated insights, Sentryhawk helps security teams proactively prioritize patching and mitigation before adversaries can exploit issues. Real-world breaches (e.g. Log4Shell, WannaCry) often stem from known but unpatched vulnerabilities. Sentryhawk aims to give organizations the clarity to see the next breach before it happens. The platform’s value lies in surfacing actionable intelligence – global, vendor and product-specific risk trends – so that defenders can make informed decisions in a rapidly evolving threat landscape.
 
+## Table of Contents
+
+- [Features](#features)
+- [Data Pipeline Architecture](#data-pipeline-architecture)
+- [Setup & Deployment](#setup--deployment)
+- [License](#license)
+- [Disclaimer](#disclaimer)
+
 ## Features
 
 - **Interactive Dashboards**: Out-of-the-box Superset dashboards show global vulnerability trends, vendor-specific risk rankings, and product-level details. Users can filter by year or vendor and see visualizations of new CVEs and exposure scores. Dashboards are publicly sharable and support alerts/reports. The stack is fully open-source, providing sub-second query latency on aggregated views.
@@ -156,5 +164,4 @@ Released under the [Apache License 2.0](./LICENSE).
 © 2025 Athul Vinod — [sentryhawk.org](https://www.sentryhawk.org)
 
 ## Disclaimer
-*Sentryhawk is an independent open-source project and is not affiliated with, endorsed by,  
-or associated with any commercial entity of the same or similar name, if one exists.*
+*Sentryhawk is an independent open-source project and is not affiliated with, endorsed by, or associated with any commercial entity of the same or similar name, if one exists.*
