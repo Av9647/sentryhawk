@@ -2,7 +2,7 @@
 
 ![status](https://img.shields.io/badge/status-Production-green) ![license](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
-Sentryhawk is a cloud-native cybersecurity intelligence platform that aggregates and enriches public vulnerability (CVE) data from multiple feeds. It computes a cumulative Exposure Index (an aggregated CVSS-based score) to highlight where software flaws are clustering. By turning scattered threat data into structured, continuously updated insights, Sentryhawk helps security teams proactively prioritize patching and mitigation before adversaries can exploit issues. Real-world breaches (e.g. Log4Shell, WannaCry) often stem from known but unpatched vulnerabilities. Sentryhawk aims to give organizations the clarity to see the next breach before it happens. The platform’s value lies in surfacing actionable intelligence – global, vendor and product-specific risk trends – so that defenders can make informed decisions in a rapidly evolving threat landscape.
+Sentryhawk is a cloud-native cybersecurity intelligence platform that aggregates and enriches public vulnerability data from multiple feeds. It computes a cumulative Exposure Index – an aggregated CVSS-based score to highlight where software flaws are clustering. By turning scattered threat data into structured, continuously updated insights, Sentryhawk helps security teams proactively prioritize patching and mitigation before adversaries can exploit issues. Real-world breaches similar to Log4Shell and WannaCry often stem from known but unpatched vulnerabilities. Sentryhawk aims to give organizations the clarity to see the next breach before it happens. The platform's value lies in surfacing actionable intelligence – global, vendor and product-specific risk trends – so that defenders can make informed decisions in a rapidly evolving threat landscape.
 
 ## Table of Contents
 
@@ -20,11 +20,11 @@ Sentryhawk is a cloud-native cybersecurity intelligence platform that aggregates
 
 - **Exposure Index**: A composite score aggregating CVSS severity across all known CVEs for a vendor/product. The Exposure Index highlights which vendors or products have an unusually high concentration of vulnerabilities. Teams can use it to prioritize patching or inventory audits where the index is high.
 
-- **Normalization & Deduplication**: Sentryhawk automatically cleans and merges overlapping feeds. Inconsistent vendor/product naming conventions are harmonized so that the same entity isn’t counted twice. This avoids false inflation of vulnerability counts and ensures the Exposure Index is meaningful.
+- **Normalization & Deduplication**: Sentryhawk automatically cleans and merges overlapping feeds. Inconsistent vendor/product naming conventions are harmonized so that the same entity isn't counted twice. This avoids false inflation of vulnerability counts and ensures the Exposure Index is meaningful.
 
   ![Drill Down](assets/drill_down.png)
 
-- **KEV & EPSS Integration**: The platform ingests the CISA’s Known Exploited Vulnerabilities (KEV) feed and the NIST EPSS CSV each run. CVEs present in the KEV list are highlighted in dashboards, and EPSS scores are attached to CVE records. This emphasizes vulnerabilities with known exploits or high expected exploitability.
+- **KEV & EPSS Integration**: The platform ingests the CISA's Known Exploited Vulnerabilities (KEV) feed and the NIST EPSS CSV each run. CVEs present in the KEV list are highlighted in dashboards, and EPSS scores are attached to CVE records. This emphasizes vulnerabilities with known exploits or high expected exploitability.
 
   ![KEV](assets/kev.png)
 
@@ -91,7 +91,7 @@ The Sentryhawk repository includes all configuration and code needed for deploym
     cd CVE-Search-Docker
     ```
 
-    Copy the provided configuration files into the root directory: docker-compose.yml, .config.yml, Dockerfile.api, cve_backfill.sh, cve_mongo_map_backup.sh, cve_sqs_log.py, etc. Populate your environment (e.g. in a .env file or via export) with the required secrets and endpoints. For example, set your NVD API key and other variables:
+    Copy the provided configuration files into the root directory: `docker-compose.yml`, `.config.yml`, `Dockerfile.api`, `cve_backfill.sh`, `cve_mongo_map_backup.sh`, `cve_sqs_log.py`, etc. Populate your environment (e.g. in a `.env` file or via export) with the required secrets and endpoints. For example, set your NVD API key and other variables:
 
     ```
     NVD_NIST_API_KEY="<YOUR_NVD_KEY>"
@@ -127,9 +127,9 @@ The Sentryhawk repository includes all configuration and code needed for deploym
 
     You can verify the API is running by querying `http://<EC2-IP>:8000/api/search/{vendor}/{product}`
 
-4. **Setup ETL Workflow on AWS**: In the AWS console or via IaC, create: an S3 bucket for ingestion data, an SQS queue with DLQ for changed keys, and an AWS Step Functions state machine using the provided JSON definition (step_functions/sentryhawk_state_machine.json). Attach an IAM role granting access to S3, SQS, Glue, EMR, etc. Configure an EventBridge Scheduled rule to trigger the Step Function daily. The Step Function uses AWS Systems Manager (Run Command) to launch the Docker-based services (MongoDB + CVE-Search) and run the CDC job each cycle.
+4. **Setup ETL Workflow on AWS**: In the AWS console or via IaC, create: an S3 bucket for ingestion data, an SQS queue with DLQ for changed keys, and an AWS Step Functions state machine using the provided JSON definition `step_functions/sentryhawk_state_machine.json`. Attach an IAM role granting access to S3, SQS, Glue, EMR, etc. Configure an EventBridge Scheduled rule to trigger the Step Function daily. The Step Function uses AWS Systems Manager `Run Command` to launch the Docker-based services (MongoDB + CVE-Search) and run the CDC job each cycle.
 
-5. **Data Transformation**: The workflow will launch the AWS Glue jobs (also provided in glue/ scripts) to transform the NDJSON data into Parquet, run DQ checks, and apply Type 2 merges. After that, it fires up an EMR Spark cluster (using the emr/ scripts) to generate the final materialized view tables. Verify that the Glue and EMR steps complete successfully. SNS alerts will notify you on failure for any step.
+5. **Data Transformation**: The workflow will launch the AWS Glue jobs (also provided in `glue/` scripts) to transform the NDJSON data into Parquet, run DQ checks, and apply Type 2 merges. After that, it fires up an EMR Spark cluster (using the `emr/` scripts) to generate the final materialized view tables. Verify that the Glue and EMR steps complete successfully. SNS alerts will notify you on failure for any step.
 
 6. **Deploy Analytics Stack**: Build the Druid ingestion image from the druid/ directory:
 
@@ -145,9 +145,9 @@ The Sentryhawk repository includes all configuration and code needed for deploym
     docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/sentryhawk_repo:cve-ingestion-druid
     ```
 
-    Adjust <REGION> and <ACCOUNT_ID> for your AWS account. Next, run this image as a task on ECS to ingest the materialized views into Apache Druid.
+    Adjust `<REGION>` and `<ACCOUNT_ID>` for your AWS account. Next, run this image as a task on ECS to ingest the materialized views into Apache Druid.
 
-7. **Configure Superset**: Launch a PostgreSQL RDS instance for Superset’s metadata. In your Docker setup, place superset_config.py (customized for the RDS host and credentials) alongside the docker-compose.yml. In .env, set the DATABASE_ variables to point Superset at the RDS (for example, DATABASE_HOST, DATABASE_USER, etc.). Then run Superset and Redis via Docker:
+7. **Configure Superset**: Launch a PostgreSQL RDS instance for Superset's metadata. In your Docker setup, place `superset_config.py` (customized for the RDS host and credentials) alongside the docker-compose.yml. In `.env`, set the DATABASE_ variables to point Superset at the RDS (for example, `DATABASE_HOST`, `DATABASE_USER`, etc.). Then run Superset and Redis via Docker:
 
     ```
     docker compose up -d superset redis
@@ -155,7 +155,7 @@ The Sentryhawk repository includes all configuration and code needed for deploym
 
     Initialize the Superset DB `superset db upgrade`, create an admin user, and import the included dashboards `superset import-dashboards -p dashboards`.
 
-8. **Domain and Security**: Finally, configure DNS and CDN. Point your domain (e.g. example.com) to a CloudFront distribution in front of the EC2 instance running Superset. Use ACM to attach an SSL certificate. Enable WAF rules. The documentation provides a CloudFront Function that forces “www” and rewrites / to the Superset dashboard home. Redact any account-specific details (like IPs or ARNs) when you publish your config.
+8. **Domain and Security**: Finally, configure DNS and CDN. Point your domain (e.g. `example.com`) to a CloudFront distribution in front of the EC2 instance running Superset. Use ACM to attach an SSL certificate. Enable WAF rules. The documentation provides a CloudFront Function that forces `www` and rewrites `/` to the Superset dashboard home. Redact any account-specific details like IPs or ARNs when you publish your config.
 
 **Note**: The above steps outline a complete deployment. All sensitive values (API keys, passwords, ARNs) should be replaced with placeholders or stored in secrets managers.
 
