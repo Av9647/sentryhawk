@@ -7,8 +7,10 @@ Sentryhawk is a cloud-native cybersecurity intelligence platform that aggregates
 ## Table of Contents
 
 - [Features](#features)
+- [Future Enhancements](#future-enhancements)
 - [Data Pipeline Architecture](#data-pipeline-architecture)
 - [Setup & Deployment](#setup--deployment)
+- [Infrastructure & Data Stack](#infrastructure--data-stack)
 - [License](#license)
 - [Disclaimer](#disclaimer)
 
@@ -29,6 +31,16 @@ Sentryhawk is a cloud-native cybersecurity intelligence platform that aggregates
   ![KEV](assets/kev.png)
 
 - **Open Source Stack**: All components are based on OSS (Python, MongoDB, Druid, Redis, Superset, etc.), with infrastructure defined in code. The result is a cost-effective, extensible system that any organization can audit and extend. All services run in Docker containers, enabling easy upgrades and community contributions.
+
+## Future Enhancements
+
+1. **Semantic CVE Search**: Building MiniLM embeddings + OpenSearch k-NN to allow "find similar vulnerabilities" across CVE records.
+
+2. **KEV Real-Time Pipeline**: Streaming KEV JSON updates via EventBridge-triggered Lambda into Kinesis Data Streams for immediate Druid indexing and dashboard alerts.
+
+3. **ML-Driven Risk Scoring**: Developing a LightGBM classifier that combines CVSS, EPSS probabilities, and KEV flags to generate a composite exploitability score, orchestrated via Step Functions.
+
+4. **End-to-End Observability**: Extending CloudWatch metrics and SNS alerts to cover KEV streaming throughput and ML inference confidence for full transparency.
 
 ## Data Pipeline Architecture
 
@@ -158,6 +170,62 @@ The Sentryhawk repository includes all configuration and code needed for deploym
 8. **Domain and Security**: Finally, configure DNS and CDN. Point your domain (e.g. `example.com`) to a CloudFront distribution in front of the EC2 instance running Superset. Use ACM to attach an SSL certificate. Enable WAF rules. The documentation provides a CloudFront Function that forces `www` and rewrites `/` to the Superset dashboard home. Redact any account-specific details like IPs or ARNs when you publish your config.
 
 **Note**: The above steps outline a complete deployment. All sensitive values (API keys, passwords, ARNs) should be replaced with placeholders or stored in secrets managers.
+
+## Infrastructure & Data Stack
+
+**Amazon Web Services (AWS)**
+- EC2 (hosts docker containers)
+- S3 (stores raw and processed data)
+- VPC (secure network environment)
+- Route 53 (DNS and DNSSEC)
+- CloudFront + WAF (CDN and Firewall)
+- RDS (PostgreSQL DB for superset metadata)
+- EMR (batch spark processing)
+- Lambda (lightweight functions)
+- Step Functions (pipeline orchestration)
+- Glue (ETL and DQ checks)
+- Kinesis Data Streams (for real-time KEV ingestion)
+- Systems Manager (runs remote commands)
+- EventBridge (pipeline scheduler)
+- CloudWatch (logs and monitoring)
+- SNS (failure notifications)
+- SQS (message queues + DLQs)
+- ECR (stores docker images)
+- ECS (runs druid ingestion task)
+- IAM (user, group, and policy control)
+- ACM (manages SSL/TLS certificates)
+- WorkMail (admin email alerts)
+
+**Data Processing**
+- MongoDB (NoSQL database)
+- Apache Druid (analytics OLAP engine)
+- Redis (caching and concurrency)
+- Apache Superset (data visualization)
+- Iceberg Tables (data processing)
+- NDJSON & Parquet formats (data storage)
+- Docker (containerization)
+
+**Data Sources / APIs**
+- NVD API (National Vulnerability Database)
+- cvelistV5 GitHub repository
+- EPSS CSV (Exploit Prediction Scoring System)
+- KEV JSON (Known Exploited Vulnerabilities)
+- Vulnerability-Lookup API
+- CIRCL's cve-search (for vendor/product lookups)
+
+**Other**
+- Python (scripting, CDC engine)
+- Bash Scripts (container orchestration, data syncs)
+- GitHub (hosting repository)
+- MobaXterm (SSH client for remote server access)
+- Git Bash (Git CLI for Windows)
+
+**Enhancement ML Tools & Frameworks**
+- **sentence-transformers** (MiniLM for generating CVE description embeddings)
+- **OpenSearch k-NN plugin** (for high-performance vector similarity search)
+- **FAISS** (for self-hosted vector indexing)
+- **LightGBM** (for training and inference of composite exploitability models)
+- **MLflow** (for experiment tracking, model registry, and reproducible deployments)
 
 ## License
 Released under the [Apache License 2.0](./LICENSE).  
