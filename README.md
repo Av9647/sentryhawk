@@ -213,19 +213,19 @@ The Sentryhawk repository includes all configuration and code needed for deploym
 - Vulnerability-Lookup API
 - CIRCL's cve-search (for vendor/product lookups)
 
-**Other**
-- Python (scripting, CDC engine)
-- Bash Scripts (container orchestration, data syncs)
-- GitHub (hosting repository)
-- MobaXterm (SSH client for remote server access)
-- Git Bash (Git CLI for Windows)
-
 **Enhancement ML Tools & Frameworks**
 - **sentence-transformers** (MiniLM for generating CVE description embeddings)
 - **OpenSearch k-NN plugin** (for high-performance vector similarity search)
 - **FAISS** (for self-hosted vector indexing)
 - **LightGBM** (for training and inference of composite exploitability models)
 - **MLflow** (for experiment tracking, model registry, and reproducible deployments)
+
+**Other**
+- Python (scripting, CDC engine)
+- Bash Scripts (container orchestration, data syncs)
+- GitHub (hosting repository)
+- MobaXterm (SSH client for remote server access)
+- Git Bash (Git CLI for Windows)
 
 ## License
 Released under the [Apache License 2.0](./LICENSE).  

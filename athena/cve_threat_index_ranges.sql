@@ -25,11 +25,11 @@ WITH
     UNION ALL
     SELECT 'monthly_product' AS level, exposure_index FROM cve_db.cve_production_monthly_product
     UNION ALL
-    SELECT 'ytd_global'     AS level, exposure_index FROM cve_db.cve_production_ytd_global
+    SELECT 'yearly_global'     AS level, exposure_index FROM cve_db.cve_production_yearly_global
     UNION ALL
-    SELECT 'ytd_vendor'     AS level, exposure_index FROM cve_db.cve_production_ytd_vendor
+    SELECT 'yearly_vendor'     AS level, exposure_index FROM cve_db.cve_production_yearly_vendor
     UNION ALL
-    SELECT 'ytd_product'    AS level, exposure_index FROM cve_db.cve_production_ytd_product
+    SELECT 'yearly_product'    AS level, exposure_index FROM cve_db.cve_production_yearly_product
   ),
 
   -- 2) Compute count, min, max, and the 25th/50th/75th percentiles per level
