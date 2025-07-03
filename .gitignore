@@ -1,1 +1,4 @@
 emr/jars/
+# bundle-2.29.5.jar
+# iceberg-aws-bundle-1.9.0.jar
+# iceberg-spark-runtime-3.5_2.12-1.9.0.jar
