@@ -131,7 +131,7 @@ The Sentryhawk repository includes all configuration and code needed for deploym
     tail -f cve_backfill.log
     ```
 
-    This populates MongoDB with NVD, CVE-List V5, and other CVE sources, and builds the vendor–product mapping collections. Once finished, start the lookup API container:
+    This populates MongoDB with NVD, cvelistV5, and other CVE sources, and builds the vendor–product mapping collections. Once finished, start the lookup API container:
 
     ```
     docker compose up -d vendor_product_api
