@@ -179,6 +179,7 @@ The Sentryhawk repository includes all configuration and code needed for deploym
 - VPC (secure network environment)
 - Route 53 (DNS and DNSSEC)
 - CloudFront + WAF (CDN and Firewall)
+- Redshift (data warehouse for analytics)
 - RDS (PostgreSQL DB for superset metadata)
 - EMR (batch spark processing)
 - Lambda (lightweight functions)
@@ -199,6 +200,7 @@ The Sentryhawk repository includes all configuration and code needed for deploym
 **Data Processing**
 - MongoDB (NoSQL database)
 - Apache Druid (analytics OLAP engine)
+- Apache Kafka (stream-processing for KEV and EPSS)
 - Redis (caching and concurrency)
 - Apache Superset (data visualization)
 - Iceberg Tables (data processing)
