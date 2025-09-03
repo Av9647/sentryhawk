@@ -2,12 +2,6 @@
   "Comment": "Sentryhawk State Machine",
   "StartAt": "Start DB EC2",
   "States": {
-    "Wait for Druid EC2 Shutdown": {
-      "Type": "Wait",
-      "Seconds": 10,
-      "Next": "Get Druid EC2 State",
-      "QueryLanguage": "JSONata"
-    },
     "Start DB EC2": {
       "Type": "Task",
       "QueryLanguage": "JSONata",
@@ -658,66 +652,336 @@
       "Arguments": {
         "ClusterId": "{% $states.input.ClusterId %}"
       },
-      "Next": "Wait for Druid EC2 Shutdown"
+      "Next": "Analytics Refresh - Redshift & Druid"
     },
-    "Get Druid EC2 State": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
-      "Next": "Check Druid EC2 State",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "InstanceIds": [
-          "i-0c7e5f521320434bd"
-        ]
-      },
-      "Output": {
-        "InstanceId": "{% $states.result.Reservations[0].Instances[0].InstanceId %}",
-        "State": "{% $states.result.Reservations[0].Instances[0].State.Name %}"
-      }
-    },
-    "Check Druid EC2 State": {
-      "Type": "Choice",
-      "Default": "Wait for Druid EC2 Shutdown",
-      "Choices": [
+    "Analytics Refresh - Redshift & Druid": {
+      "Type": "Parallel",
+      "Next": "Run Success",
+      "Branches": [
         {
-          "Next": "Upgrade Druid EC2",
-          "Condition": "{% ($states.input.State) = (\"stopped\") %}"
+          "StartAt": "Get Workgroup",
+          "States": {
+            "Get Workgroup": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftserverless:getWorkgroup",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "Workgroup Not Found"
+                }
+              ],
+              "QueryLanguage": "JSONata",
+              "Output": "{% $states.result %}",
+              "Arguments": {
+                "WorkgroupName": "cve-production-redshift-wg"
+              },
+              "End": true
+            },
+            "Workgroup Not Found": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+              "Next": "Get Workgroup",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
+                "Message": "{% $states.input & '\n\nRedshift Serverless Workgroup Not Found. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
+              }
+            }
+          }
         },
         {
-          "Next": "Shutdown Druid Containers",
-          "Condition": "{% ($states.input.State) = (\"running\") %}"
+          "StartAt": "Get Druid EC2 State",
+          "States": {
+            "Wait for Druid EC2 Shutdown": {
+              "Type": "Wait",
+              "Seconds": 10,
+              "QueryLanguage": "JSONata",
+              "Next": "Get Druid EC2 State"
+            },
+            "Get Druid EC2 State": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+              "Next": "Check Druid EC2 State",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "InstanceIds": [
+                  "i-0c7e5f521320434bd"
+                ]
+              },
+              "Output": {
+                "InstanceId": "{% $states.result.Reservations[0].Instances[0].InstanceId %}",
+                "State": "{% $states.result.Reservations[0].Instances[0].State.Name %}"
+              }
+            },
+            "Check Druid EC2 State": {
+              "Type": "Choice",
+              "Default": "Wait for Druid EC2 Shutdown",
+              "Choices": [
+                {
+                  "Next": "Upgrade Druid EC2",
+                  "Condition": "{% ($states.input.State) = (\"stopped\") %}"
+                },
+                {
+                  "Next": "Shutdown Druid Containers",
+                  "Condition": "{% ($states.input.State) = (\"running\") %}"
+                }
+              ],
+              "QueryLanguage": "JSONata"
+            },
+            "Shutdown Druid Containers": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+              "Next": "Wait for Druid Container Shutdown",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "DocumentName": "AWS-RunShellScript",
+                "InstanceIds": [
+                  "{% $states.input.InstanceId %}"
+                ],
+                "Parameters": {
+                  "workingDirectory": [
+                    "/home/ec2-user/druid-cluster"
+                  ],
+                  "commands": [
+                    "sudo -u ec2-user bash -c 'docker compose down'"
+                  ]
+                }
+              },
+              "Output": {
+                "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+              }
+            },
+            "Wait for Druid Container Shutdown": {
+              "Type": "Wait",
+              "Seconds": 10,
+              "Next": "Shutdown Druid EC2",
+              "QueryLanguage": "JSONata"
+            },
+            "Upgrade Druid EC2": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ec2:modifyInstanceAttribute",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "InstanceId": "{% $states.input.InstanceId %}",
+                "InstanceType": {
+                  "Value": "c5.4xlarge"
+                }
+              },
+              "Next": "Start Druid EC2",
+              "Output": {
+                "InstanceId": "{% $states.input.InstanceId %}"
+              }
+            },
+            "Start Druid EC2": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ec2:startInstances",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "InstanceIds": [
+                  "{% $states.input.InstanceId %}"
+                ]
+              },
+              "Output": {
+                "InstanceId": "{% $states.result.StartingInstances[0].InstanceId %}"
+              },
+              "Next": "Wait for Druid EC2 Start"
+            },
+            "Wait for Druid EC2 Start": {
+              "Type": "Wait",
+              "Seconds": 15,
+              "QueryLanguage": "JSONata",
+              "Next": "Start Druid Containers"
+            },
+            "Start Druid Containers": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "DocumentName": "AWS-RunShellScript",
+                "InstanceIds": [
+                  "{% $states.input.InstanceId %}"
+                ],
+                "Parameters": {
+                  "workingDirectory": [
+                    "/home/ec2-user/druid-cluster"
+                  ],
+                  "commands": [
+                    "sudo -u ec2-user bash -c 'docker compose up -d'"
+                  ]
+                }
+              },
+              "Output": {
+                "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+              },
+              "Next": "Wait for Druid Container Start"
+            },
+            "Wait for Druid Container Start": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "QueryLanguage": "JSONata",
+              "Next": "Run Druid ECS Task"
+            },
+            "Run Druid ECS Task": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "Cluster": "sentryhawk_ecs_cluster",
+                "TaskDefinition": "sentryhawk-cve-ingestion-druid:37",
+                "LaunchType": "FARGATE",
+                "PlatformVersion": "LATEST",
+                "NetworkConfiguration": {
+                  "AwsvpcConfiguration": {
+                    "Subnets": [
+                      "subnet-0a896bf02807dd0c2"
+                    ],
+                    "SecurityGroups": [
+                      "sg-058e7bc5c8813b46a"
+                    ],
+                    "AssignPublicIp": "ENABLED"
+                  }
+                }
+              },
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "Halt Druid EC2"
+                }
+              ],
+              "Next": "Stop Druid Containers"
+            },
+            "Halt Druid EC2": {
+              "Type": "Task",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "InstanceIds": [
+                  "i-0c7e5f521320434bd"
+                ]
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
+              "Next": "Druid ECS Task Failed"
+            },
+            "Stop Druid Containers": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "DocumentName": "AWS-RunShellScript",
+                "InstanceIds": [
+                  "i-0c7e5f521320434bd"
+                ],
+                "Parameters": {
+                  "workingDirectory": [
+                    "/home/ec2-user/druid-cluster"
+                  ],
+                  "commands": [
+                    "sudo -u ec2-user bash -c 'docker compose down'"
+                  ]
+                }
+              },
+              "Output": {
+                "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+              },
+              "Next": "Wait for Druid Container Stop"
+            },
+            "Wait for Druid Container Stop": {
+              "Type": "Wait",
+              "Seconds": 10,
+              "QueryLanguage": "JSONata",
+              "Next": "Stop Druid EC2"
+            },
+            "Stop Druid EC2": {
+              "Type": "Task",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "InstanceIds": [
+                  "{% $states.input.InstanceId %}"
+                ]
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
+              "Output": {
+                "InstanceId": "{% $states.result.StoppingInstances[0].InstanceId %}"
+              },
+              "Next": "Wait for Druid EC2 Stop"
+            },
+            "Wait for Druid EC2 Stop": {
+              "Type": "Wait",
+              "Seconds": 10,
+              "QueryLanguage": "JSONata",
+              "Next": "Get Druid EC2 Status"
+            },
+            "Get Druid EC2 Status": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "InstanceIds": [
+                  "{% $states.input.InstanceId %}"
+                ]
+              },
+              "Output": {
+                "InstanceId": "{% $states.result.Reservations[0].Instances[0].InstanceId %}",
+                "State": "{% $states.result.Reservations[0].Instances[0].State.Name %}"
+              },
+              "Next": "Check Druid EC2 Status"
+            },
+            "Check Druid EC2 Status": {
+              "Type": "Choice",
+              "Default": "Wait for Druid EC2 Stop",
+              "Choices": [
+                {
+                  "Next": "Downgrade Druid EC2",
+                  "Condition": "{% ($states.input.State) = (\"stopped\") %}"
+                }
+              ],
+              "QueryLanguage": "JSONata"
+            },
+            "Druid ECS Task Failed": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
+                "Message": "{% 'Druid ECS task failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
+              },
+              "Next": "Run Druid ECS Task"
+            },
+            "Shutdown Druid EC2": {
+              "Type": "Task",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "InstanceIds": [
+                  "i-0c7e5f521320434bd"
+                ]
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
+              "Output": {
+                "InstanceId": "{% $states.result.StoppingInstances[0].InstanceId %}"
+              },
+              "Next": "Get Druid EC2 State"
+            },
+            "Downgrade Druid EC2": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ec2:modifyInstanceAttribute",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "InstanceId": "{% $states.input.InstanceId %}",
+                "InstanceType": {
+                  "Value": "m5.large"
+                }
+              },
+              "Output": {
+                "InstanceId": "{% $states.input.InstanceId %}"
+              },
+              "End": true
+            }
+          }
         }
-      ],
-      "QueryLanguage": "JSONata"
-    },
-    "Shutdown Druid Containers": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
-      "Next": "Wait for Druid Container Shutdown",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "DocumentName": "AWS-RunShellScript",
-        "InstanceIds": [
-          "{% $states.input.InstanceId %}"
-        ],
-        "Parameters": {
-          "workingDirectory": [
-            "/home/ec2-user/druid-cluster"
-          ],
-          "commands": [
-            "sudo -u ec2-user bash -c 'docker compose down'"
-          ]
-        }
-      },
-      "Output": {
-        "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
-      }
-    },
-    "Wait for Druid Container Shutdown": {
-      "Type": "Wait",
-      "Seconds": 10,
-      "Next": "Shutdown Druid EC2",
-      "QueryLanguage": "JSONata"
+      ]
     },
     "EMR Step Failed": {
       "Type": "Task",
@@ -728,226 +992,6 @@
         "Message": "{% $states.input & '\n\nEMR Step failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
       },
       "Next": "Create EMR Cluster"
-    },
-    "Upgrade Druid EC2": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:ec2:modifyInstanceAttribute",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "InstanceId": "{% $states.input.InstanceId %}",
-        "InstanceType": {
-          "Value": "c5.4xlarge"
-        }
-      },
-      "Next": "Start Druid EC2",
-      "Output": {
-        "InstanceId": "{% $states.input.InstanceId %}"
-      }
-    },
-    "Start Druid EC2": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:ec2:startInstances",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "InstanceIds": [
-          "{% $states.input.InstanceId %}"
-        ]
-      },
-      "Output": {
-        "InstanceId": "{% $states.result.StartingInstances[0].InstanceId %}"
-      },
-      "Next": "Wait for Druid EC2 Start"
-    },
-    "Wait for Druid EC2 Start": {
-      "Type": "Wait",
-      "Seconds": 15,
-      "QueryLanguage": "JSONata",
-      "Next": "Start Druid Containers"
-    },
-    "Start Druid Containers": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "DocumentName": "AWS-RunShellScript",
-        "InstanceIds": [
-          "{% $states.input.InstanceId %}"
-        ],
-        "Parameters": {
-          "workingDirectory": [
-            "/home/ec2-user/druid-cluster"
-          ],
-          "commands": [
-            "sudo -u ec2-user bash -c 'docker compose up -d'"
-          ]
-        }
-      },
-      "Output": {
-        "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
-      },
-      "Next": "Wait for Druid Container Start"
-    },
-    "Wait for Druid Container Start": {
-      "Type": "Wait",
-      "Seconds": 60,
-      "QueryLanguage": "JSONata",
-      "Next": "Run Druid ECS Task"
-    },
-    "Run Druid ECS Task": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::ecs:runTask.sync",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "Cluster": "sentryhawk_ecs_cluster",
-        "TaskDefinition": "sentryhawk-cve-ingestion-druid:37",
-        "LaunchType": "FARGATE",
-        "PlatformVersion": "LATEST",
-        "NetworkConfiguration": {
-          "AwsvpcConfiguration": {
-            "Subnets": [
-              "subnet-0a896bf02807dd0c2"
-            ],
-            "SecurityGroups": [
-              "sg-058e7bc5c8813b46a"
-            ],
-            "AssignPublicIp": "ENABLED"
-          }
-        }
-      },
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Next": "Halt Druid EC2"
-        }
-      ],
-      "Next": "Stop Druid Containers"
-    },
-    "Halt Druid EC2": {
-      "Type": "Task",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "InstanceIds": [
-          "i-0c7e5f521320434bd"
-        ]
-      },
-      "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
-      "Next": "Druid ECS Task Failed"
-    },
-    "Stop Druid Containers": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "DocumentName": "AWS-RunShellScript",
-        "InstanceIds": [
-          "i-0c7e5f521320434bd"
-        ],
-        "Parameters": {
-          "workingDirectory": [
-            "/home/ec2-user/druid-cluster"
-          ],
-          "commands": [
-            "sudo -u ec2-user bash -c 'docker compose down'"
-          ]
-        }
-      },
-      "Output": {
-        "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
-      },
-      "Next": "Wait for Druid Container Stop"
-    },
-    "Wait for Druid Container Stop": {
-      "Type": "Wait",
-      "Seconds": 10,
-      "QueryLanguage": "JSONata",
-      "Next": "Stop Druid EC2"
-    },
-    "Stop Druid EC2": {
-      "Type": "Task",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "InstanceIds": [
-          "{% $states.input.InstanceId %}"
-        ]
-      },
-      "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
-      "Output": {
-        "InstanceId": "{% $states.result.StoppingInstances[0].InstanceId %}"
-      },
-      "Next": "Wait for Druid EC2 Stop"
-    },
-    "Wait for Druid EC2 Stop": {
-      "Type": "Wait",
-      "Seconds": 10,
-      "QueryLanguage": "JSONata",
-      "Next": "Get Druid EC2 Status"
-    },
-    "Get Druid EC2 Status": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "InstanceIds": [
-          "{% $states.input.InstanceId %}"
-        ]
-      },
-      "Output": {
-        "InstanceId": "{% $states.result.Reservations[0].Instances[0].InstanceId %}",
-        "State": "{% $states.result.Reservations[0].Instances[0].State.Name %}"
-      },
-      "Next": "Check Druid EC2 Status"
-    },
-    "Check Druid EC2 Status": {
-      "Type": "Choice",
-      "Default": "Wait for Druid EC2 Stop",
-      "Choices": [
-        {
-          "Next": "Downgrade Druid EC2",
-          "Condition": "{% ($states.input.State) = (\"stopped\") %}"
-        }
-      ],
-      "QueryLanguage": "JSONata"
-    },
-    "Druid ECS Task Failed": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
-        "Message": "{% 'Druid ECS task failed. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
-      },
-      "Next": "Run Druid ECS Task"
-    },
-    "Shutdown Druid EC2": {
-      "Type": "Task",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "InstanceIds": [
-          "i-0c7e5f521320434bd"
-        ]
-      },
-      "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
-      "Output": {
-        "InstanceId": "{% $states.result.StoppingInstances[0].InstanceId %}"
-      },
-      "Next": "Wait for Druid EC2 Shutdown"
-    },
-    "Downgrade Druid EC2": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:ec2:modifyInstanceAttribute",
-      "QueryLanguage": "JSONata",
-      "Arguments": {
-        "InstanceId": "{% $states.input.InstanceId %}",
-        "InstanceType": {
-          "Value": "m5.large"
-        }
-      },
-      "Output": {
-        "InstanceId": "{% $states.input.InstanceId %}"
-      },
-      "Next": "Run Success"
     },
     "Run Success": {
       "Type": "Task",
