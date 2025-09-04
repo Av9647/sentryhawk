@@ -677,7 +677,53 @@
               "Arguments": {
                 "WorkgroupName": "cve-production-redshift-wg"
               },
-              "End": true
+              "Next": "Sync Production Master"
+            },
+            "Sync Production Master": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:executeStatement",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "WorkgroupName": "cve-production-redshift-wg",
+                "Database": "dev",
+                "Sql": "CALL analytics.sync_cve_production_master();",
+                "StatementName": "sync_cve_production_master",
+                "WithEvent": true
+              },
+              "Next": "Get Query Status",
+              "Output": {
+                "Id": "{% $states.result.Id %}"
+              }
+            },
+            "Get Query Status": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:describeStatement",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "Id": "{% $states.input.Id %}"
+              },
+              "Next": "Check Query Status"
+            },
+            "Check Query Status": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Next": "Query Finished",
+                  "Condition": "{% ($states.input.Status) = (\"FINISHED\") or ($states.input.Status) = (\"ABORTED\") %}"
+                },
+                {
+                  "Next": "Query Failed",
+                  "Condition": "{% ($states.input.Status) = (\"FAILED\") %}"
+                }
+              ],
+              "QueryLanguage": "JSONata",
+              "Default": "Wait for Query"
+            },
+            "Wait for Query": {
+              "Type": "Wait",
+              "Seconds": 10,
+              "Next": "Get Query Status",
+              "QueryLanguage": "JSONata"
             },
             "Workgroup Not Found": {
               "Type": "Task",
@@ -688,6 +734,26 @@
                 "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
                 "Message": "{% $states.input & '\n\nRedshift Serverless Workgroup Not Found. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
               }
+            },
+            "Query Finished": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
+                "Message": "{% 'Redshift successfully synced.' %}"
+              },
+              "End": true
+            },
+            "Query Failed": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish.waitForTaskToken",
+              "QueryLanguage": "JSONata",
+              "Arguments": {
+                "TopicArn": "arn:aws:sns:us-east-2:${ACCOUNT_ID}:cve_sns_topic",
+                "Message": "{% $states.input & '\n\nRedshift Serverless Workgroup Not Found. Resume the pipeline after fixing task: https://8icj443bt1.execute-api.us-east-2.amazonaws.com/prod/resume?taskToken={{Task.Token}}' %}"
+              },
+              "Next": "Sync Production Master"
             }
           }
         },
