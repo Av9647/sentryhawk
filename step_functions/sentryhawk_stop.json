@@ -1,0 +1,97 @@
+{
+  "Comment": "Sentryhawk Stop",
+  "StartAt": "Stop EC2",
+  "States": {
+    "Stop EC2": {
+      "Type": "Parallel",
+      "End": true,
+      "Branches": [
+        {
+          "StartAt": "Stop Druid Containers",
+          "States": {
+            "Stop Druid Containers": {
+              "Type": "Task",
+              "Arguments": {
+                "DocumentName": "AWS-RunShellScript",
+                "InstanceIds": [
+                  "i-0c7e5f521320434bd"
+                ],
+                "Parameters": {
+                  "workingDirectory": [
+                    "/home/ec2-user/druid-cluster"
+                  ],
+                  "commands": [
+                    "sudo -u ec2-user bash -c 'docker compose down'"
+                  ]
+                }
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+              "Next": "Wait for Druid Container Stop",
+              "Output": {
+                "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+              }
+            },
+            "Wait for Druid Container Stop": {
+              "Type": "Wait",
+              "Seconds": 10,
+              "Next": "Stop Druid EC2"
+            },
+            "Stop Druid EC2": {
+              "Type": "Task",
+              "Arguments": {
+                "InstanceIds": [
+                  "{% $states.input.InstanceId %}"
+                ]
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "Stop Superset Containers",
+          "States": {
+            "Stop Superset Containers": {
+              "Type": "Task",
+              "Arguments": {
+                "DocumentName": "AWS-RunShellScript",
+                "InstanceIds": [
+                  "i-02edad213b3b33b8b"
+                ],
+                "Parameters": {
+                  "workingDirectory": [
+                    "/home/ec2-user"
+                  ],
+                  "commands": [
+                    "sudo /usr/local/bin/docker-compose down"
+                  ]
+                }
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+              "Next": "Wait for Superset Container Stop",
+              "Output": {
+                "InstanceId": "{% $states.result.Command.InstanceIds[0] %}"
+              }
+            },
+            "Wait for Superset Container Stop": {
+              "Type": "Wait",
+              "Seconds": 20,
+              "Next": "Stop Superset EC2"
+            },
+            "Stop Superset EC2": {
+              "Type": "Task",
+              "Arguments": {
+                "InstanceIds": [
+                  "{% $states.input.InstanceId %}"
+                ]
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ec2:stopInstances",
+              "End": true
+            }
+          }
+        }
+      ]
+    }
+  },
+  "QueryLanguage": "JSONata"
+}

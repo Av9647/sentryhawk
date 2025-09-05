@@ -1,0 +1,97 @@
+{
+  "Comment": "Sentryhawk Start",
+  "StartAt": "Start EC2",
+  "States": {
+    "Start EC2": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "Start Druid EC2",
+          "States": {
+            "Start Druid EC2": {
+              "Type": "Task",
+              "Arguments": {
+                "InstanceIds": [
+                  "i-0c7e5f521320434bd"
+                ]
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ec2:startInstances",
+              "Next": "Wait for Druid EC2 Start",
+              "Output": {
+                "InstanceId": "{% $states.result.StartingInstances[0].InstanceId %}"
+              }
+            },
+            "Wait for Druid EC2 Start": {
+              "Type": "Wait",
+              "Seconds": 15,
+              "Next": "Start Druid Containers"
+            },
+            "Start Druid Containers": {
+              "Type": "Task",
+              "Arguments": {
+                "DocumentName": "AWS-RunShellScript",
+                "InstanceIds": [
+                  "{% $states.input.InstanceId %}"
+                ],
+                "Parameters": {
+                  "workingDirectory": [
+                    "/home/ec2-user/druid-cluster"
+                  ],
+                  "commands": [
+                    "sudo -u ec2-user bash -c 'docker compose up -d'"
+                  ]
+                }
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "Start Superset EC2",
+          "States": {
+            "Start Superset EC2": {
+              "Type": "Task",
+              "Arguments": {
+                "InstanceIds": [
+                  "i-02edad213b3b33b8b"
+                ]
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ec2:startInstances",
+              "Next": "Wait for Superset EC2 Start",
+              "Output": {
+                "InstanceId": "{% $states.result.StartingInstances[0].InstanceId %}"
+              }
+            },
+            "Wait for Superset EC2 Start": {
+              "Type": "Wait",
+              "Seconds": 25,
+              "Next": "Start Superset Containers"
+            },
+            "Start Superset Containers": {
+              "Type": "Task",
+              "Arguments": {
+                "DocumentName": "AWS-RunShellScript",
+                "InstanceIds": [
+                  "{% $states.input.InstanceId %}"
+                ],
+                "Parameters": {
+                  "workingDirectory": [
+                    "/home/ec2-user"
+                  ],
+                  "commands": [
+                    "sudo /usr/local/bin/docker-compose up -d"
+                  ]
+                }
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+              "End": true
+            }
+          }
+        }
+      ],
+      "End": true
+    }
+  },
+  "QueryLanguage": "JSONata"
+}
