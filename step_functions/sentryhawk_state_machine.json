@@ -18,7 +18,7 @@
     },
     "Wait for DB EC2 Start": {
       "Type": "Wait",
-      "Seconds": 15,
+      "Seconds": 20,
       "Next": "Start DB Containers",
       "QueryLanguage": "JSONata"
     },
