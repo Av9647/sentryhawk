@@ -1,0 +1,55 @@
+{
+  "type": "kafka",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "kev_feed",
+      "timestampSpec": {
+        "column": "dateAdded",
+        "format": "iso"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          { "type": "string", "name": "cveId" },
+          { "type": "string", "name": "vendorProject" },
+          { "type": "string", "name": "product" },
+          { "type": "string", "name": "vulnerabilityName" },
+          { "type": "string", "name": "dateAdded" },
+          { "type": "string", "name": "shortDescription" },
+          { "type": "string", "name": "requiredAction" },
+          { "type": "string", "name": "dueDate" },
+          { "type": "string", "name": "knownRansomwareCampaignUse" },
+          { "type": "string", "name": "notes" }
+        ]
+      },
+      "transformSpec": {
+        "transforms": [
+          {
+            "type": "expression",
+            "name": "cveId",
+            "expression": "cveID"
+          }
+        ]
+      },
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "hour",
+        "queryGranularity": "none",
+        "rollup": false
+      }
+    },
+    "ioConfig": {
+      "type": "kafka",
+      "consumerProperties": {
+        "bootstrap.servers": "kafka:29092"
+      },
+      "topic": "feed.kev",
+      "inputFormat": {
+        "type": "json"
+      },
+      "useEarliestOffset": true
+    },
+    "tuningConfig": {
+      "type": "kafka"
+    }
+  }
+}

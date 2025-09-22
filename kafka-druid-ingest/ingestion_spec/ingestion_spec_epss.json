@@ -1,0 +1,48 @@
+{
+  "type": "kafka",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "epss_scores",
+      "timestampSpec": {
+        "column": "date",
+        "format": "yyyy-MM-dd"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          { "type": "string", "name": "cveId" },
+          { "type": "double", "name": "epss" },
+          { "type": "double", "name": "percentile" }
+        ]
+      },
+      "transformSpec": {
+        "transforms": [
+          {
+            "type": "expression",
+            "name": "cveId",
+            "expression": "cve"
+          }
+        ]
+      },
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "hour",
+        "queryGranularity": "none",
+        "rollup": false
+      }
+    },
+    "ioConfig": {
+      "type": "kafka",
+      "consumerProperties": {
+        "bootstrap.servers": "kafka:29092"
+      },
+      "topic": "feed.epss",
+      "inputFormat": {
+        "type": "json"
+      },
+      "useEarliestOffset": true
+    },
+    "tuningConfig": {
+      "type": "kafka"
+    }
+  }
+}

@@ -39,7 +39,9 @@ services:
       - POSTGRES_PASSWORD=FoolishPassword
       - POSTGRES_USER=druid
       - POSTGRES_DB=druid
-
+    networks:
+      - druid-net
+      
   # Need 3.5 or later for container nodes
   zookeeper:
     container_name: zookeeper
@@ -48,11 +50,14 @@ services:
       - "2181:2181"
     environment:
       - ZOO_MY_ID=1
+    networks:
+      - druid-net
 
   coordinator:
     image: apache/druid:32.0.1
     container_name: coordinator
     volumes:
+      - ./druid/conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
       - druid_shared:/opt/shared
       - coordinator_var:/opt/druid/var
     depends_on:
@@ -64,6 +69,8 @@ services:
       - coordinator
     env_file:
       - environment
+    networks:
+      - druid-net
 
   broker:
     image: apache/druid:32.0.1
@@ -80,6 +87,8 @@ services:
       - broker
     env_file:
       - environment
+    networks:
+      - druid-net
 
   historical:
     image: apache/druid:32.0.1
@@ -97,11 +106,14 @@ services:
       - historical
     env_file:
       - environment
+    networks:
+      - druid-net
 
   middlemanager:
     image: apache/druid:32.0.1
     container_name: middlemanager
     volumes:
+      - ./druid/conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
       - druid_shared:/opt/shared
       - middle_var:/opt/druid/var
     depends_on:
@@ -115,12 +127,15 @@ services:
       - middleManager
     env_file:
       - environment
+    networks:
+      - druid-net
 
   router:
     image: apache/druid:32.0.1
     container_name: router
     volumes:
       - router_var:/opt/druid/var
+      - ./druid/conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
     depends_on:
       - zookeeper
       - postgres
@@ -131,3 +146,44 @@ services:
       - router
     env_file:
       - environment
+    networks:
+      - druid-net
+
+  overlord:
+    image: apache/druid:32.0.1
+    container_name: overlord
+    volumes:
+      - ./druid/conf/common.runtime.properties:/opt/druid/conf/druid/cluster/_common/common.runtime.properties
+      - druid_shared:/opt/shared
+    depends_on:
+      - zookeeper
+      - postgres
+    ports:
+      - "8090:8090"
+    command:
+      - overlord
+    env_file:
+      - environment
+    networks:
+      - druid-net
+
+  kafka:
+    image: wurstmeister/kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - druid-net
+
+networks:
+  druid-net:
+    driver: bridge
