@@ -46,7 +46,8 @@
       "inputFormat": {
         "type": "json"
       },
-      "useEarliestOffset": true
+      "useEarliestOffset": true,
+      "appendToExisting": true
     },
     "tuningConfig": {
       "type": "kafka"
