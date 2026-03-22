@@ -2,11 +2,12 @@
 
 ![status](https://img.shields.io/badge/status-Production-green) ![license](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
-Sentryhawk is a cloud-native cybersecurity platform that aggregates and enriches public vulnerability data from multiple feeds including NVD, cvelistV5, KEV and EPSS. The platform computes a cumulative Exposure Index — an aggregated CVSS-based score that highlights clustering software flaws. By transforming scattered threat data into structured, continuously updated insights, it helps security teams proactively prioritize patching and mitigation before adversaries can exploit vulnerabilities. Past breaches similar to Log4Shell and WannaCry often stem from known but unpatched vulnerabilities and this platform gives organizations the clarity to anticipate the next major breach. It surfaces actionable intelligence on global, vendor and product-specific risk trends, empowering defenders to make informed decisions in a rapidly evolving threat landscape.
+Sentryhawk is a data engineering project that aggregates public vulnerability data from NVD, cvelistV5, KEV and EPSS into a unified analytical platform. It normalizes and deduplicates records across these feeds, computes a weighted Exposure Index from CVSS scores and serves the results through interactive dashboards. The project was built to explore how scattered, heterogeneous vulnerability feeds can be structured into a consistent, queryable dataset and how derived metrics like cumulative severity scores can surface risk concentration across vendors and products that raw CVE counts alone would obscure.
 
 ## Table of Contents
 
 - [Features](#features)
+- [Exposure Index](#exposure-index)
 - [Data Pipeline Architecture](#data-pipeline-architecture)
 - [Setup & Deployment](#setup--deployment)
 - [Infrastructure & Data Stack](#infrastructure--data-stack)
@@ -14,7 +15,7 @@ Sentryhawk is a cloud-native cybersecurity platform that aggregates and enriches
 
 ## Features
 
-- **Interactive Dashboards**: Out-of-the-box Superset dashboards show global vulnerability trends, vendor-specific risk rankings and product-level details. Users can filter by year or vendor and see visualizations of new CVEs and exposure scores. Dashboards are publicly sharable and support alerts/reports. The BI stack is fully open-source, providing sub-second query latency on aggregated views.  
+- **Interactive Dashboards**: Preconfigured Superset dashboards show global vulnerability trends, vendor-specific risk rankings and product-level details. Users can filter by year or vendor and see visualizations of new CVEs and exposure scores. Dashboards are publicly sharable and support alerts/reports. The BI stack is fully open-source, providing sub-second query latency on aggregated views.  
 
   ![Global View](assets/01_global_view.png)
 
@@ -33,6 +34,35 @@ Sentryhawk is a cloud-native cybersecurity platform that aggregates and enriches
 - **Open Source Stack**: All components are based on OSS (Python, MongoDB, Druid, Redis, Superset, etc.), with infrastructure defined in code. The result is a cost-effective, extensible system that any organization can audit and extend. All services run in Docker containers, enabling easy upgrades and community contributions.  
 
   ![CVE Lookup](assets/13_cve_lookup.png)
+
+## Exposure Index
+
+The Exposure Index is a weighted severity score that quantifies the cumulative risk burden of a vendor or product based on its known CVEs. Rather than simply counting vulnerabilities, it scales each CVE's CVSS base score by its severity tier to ensure that a Critical vulnerability contributes proportionally more weight than a Medium one.
+
+**Scoring Formula**
+
+Each CVE is assigned a weighted score derived from its CVSS base score:
+
+| Severity         | Weight | Example                  |
+| ---------------- | ------ | ------------------------ |
+| Critical (9.0–10.0) | 1.00×  | 9.8 (for CVSS 9.8)   |
+| High (7.0–8.9)   | 0.75×  | 6.0 (for CVSS 8.0)       |
+| Medium (4.0–6.9) | 0.50×  | 2.75 (for CVSS 5.5)      |
+| Low (0.1–3.9)    | 0.25×  | 0.5 (for CVSS 2.0)       |
+
+> The Exposure Index for a given vendor, product or time window is the sum of all weighted scores across its CVEs.
+
+**Thresholds & Classification**
+
+Exposure Index thresholds are computed dynamically at pipeline runtime using the **25th**, **50th** and **75th percentiles** of the score distribution across all entities in a given aggregation level (global, vendor, or product). This makes the classification adaptive. Thresholds automatically recalibrate as the CVE landscape evolves. An entity scoring above the 75th percentile is flagged as high exposure, while below the 25th percentile is considered low.
+
+**Network Exposure Index**
+
+A parallel metric, the Network Exposure Index applies the same weighted aggregation but filters exclusively to CVEs with a network-based attack vector (`AV:N` in the CVSS vector string). This isolates remotely exploitable risk, which is typically of higher operational concern to defenders.
+
+**Aggregation Levels**
+
+The index is computed across multiple time granularities (daily, monthly, yearly) and entity scopes (global, vendor, product), as well as trailing windows (last 30 days, last 12 months) to support both trend analysis and point-in-time risk snapshots.
 
 ## Data Pipeline Architecture
 
