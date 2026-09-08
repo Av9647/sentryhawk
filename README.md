@@ -232,5 +232,4 @@ The Sentryhawk repository includes all configuration and code needed for deploym
 - **Developer Tools:** MobaXterm, Git Bash
 
 ## License
-Released under the [Apache License 2.0](./LICENSE).  
-© 2025 Athul Vinod — [sentryhawk.org](https://www.sentryhawk.org)
+Released under the [Apache License 2.0](./LICENSE).
